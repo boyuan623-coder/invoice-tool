@@ -1,0 +1,8 @@
+pdfplumber>=0.11.0
+PyMuPDF>=1.24.0
+openpyxl>=3.1.0
+# CPU 版 Paddle，兼容无 GPU 的电脑（其他电脑无法识别的常见原因）
+paddlepaddle==3.1.0
+paddleocr>=3.0.0,<4.0.0
+flask>=3.0.0
+waitress>=3.0.0

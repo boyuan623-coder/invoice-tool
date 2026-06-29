@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>电子发票识别工具</title>
+<style>
+  :root {
+    --primary: #4f6ef7;
+    --bg: #f0f2f5;
+    --card: #fff;
+    --text: #1a1a2e;
+    --text2: #6b7280;
+    --border: #e5e7eb;
+    --success: #10b981;
+    --radius: 12px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+  }
+
+  .header {
+    background: linear-gradient(135deg, #4f6ef7 0%, #6c8cff 100%);
+    color: #fff; padding: 28px 32px; text-align: center;
+    box-shadow: 0 2px 12px rgba(79,110,247,0.25);
+  }
+  .header h1 { font-size: 22px; font-weight: 600; }
+  .header p { font-size: 13px; opacity: 0.85; margin-top: 4px; }
+
+  .container { max-width: 700px; margin: 0 auto; padding: 30px 20px; }
+
+  /* 上传卡片 */
+  .upload-cards { display: flex; gap: 20px; margin-bottom: 24px; }
+  @media (max-width: 600px) { .upload-cards { flex-direction: column; } }
+
+  .upload-card {
+    flex: 1; background: var(--card); border-radius: var(--radius);
+    padding: 40px 24px; text-align: center; cursor: pointer;
+    border: 2px dashed var(--border); transition: all 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .upload-card:hover { border-color: var(--primary); background: #f8faff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+  .upload-card .icon { font-size: 44px; margin-bottom: 14px; }
+  .upload-card h3 { font-size: 16px; margin-bottom: 6px; }
+  .upload-card p { font-size: 12px; color: var(--text2); line-height: 1.6; }
+  input[type=file] { display: none; }
+
+  /* 文件列表 */
+  .file-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #f0f2ff; border-radius: 8px; padding: 8px 14px;
+    font-size: 13px; margin-bottom: 16px;
+  }
+  .file-badge .count { font-weight: 600; color: var(--primary); }
+
+  .btn {
+    padding: 10px 18px; border: none; border-radius: 8px;
+    font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s;
+  }
+  .btn-primary { background: var(--primary); color: #fff; font-size: 15px; padding: 12px 32px; }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-outline { background: #fff; border: 1.5px solid var(--border); color: var(--text2); }
+  .btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+
+  /* 进度 */
+  .progress-section { display: none; margin-bottom: 20px; }
+  .progress-section.active { display: block; }
+  .progress-card {
+    background: var(--card); border-radius: var(--radius); padding: 20px 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .progress-bar-wrap { height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; margin: 10px 0; }
+  .progress-bar-fill { height: 100%; background: linear-gradient(90deg, #4f6ef7, #6c8cff); border-radius: 4px; transition: width 0.3s; width: 0; }
+  .progress-text { font-size: 13px; color: var(--text2); }
+
+  /* 结果 */
+  .result-section { display: none; }
+  .result-section.active { display: block; }
+  .result-card { background: var(--card); border-radius: var(--radius); padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  .summary { display: flex; gap: 12px; margin-bottom: 20px; }
+  .stat { background: #f0f2ff; border-radius: 10px; padding: 14px 18px; text-align: center; flex: 1; }
+  .stat .num { font-size: 24px; font-weight: 700; color: var(--primary); }
+  .stat .label { font-size: 12px; color: var(--text2); margin-top: 2px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th { background: #f8fafc; padding: 9px 10px; text-align: left; font-weight: 600; border-bottom: 2px solid var(--border); white-space: nowrap; }
+  tbody td { padding: 8px 10px; border-bottom: 1px solid #f3f4f6; }
+  tbody tr:hover { background: #fafbff; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+  .badge-ok { background: #d1fae5; color: #065f46; }
+  .badge-ocr { background: #fef3c7; color: #92400e; }
+
+  .btn-download {
+    display: inline-block; background: var(--success); color: #fff; text-decoration: none;
+    padding: 10px 24px; border-radius: 8px; font-size: 14px; font-weight: 500; margin-top: 16px;
+  }
+  .btn-download:hover { background: #059669; }
+  .error-msg { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 12px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📄 电子发票识别工具</h1>
+  <p>上传 PDF → 自动识别 → 导出 Excel</p>
+</div>
+
+<div class="container">
+
+  <!-- 两个上传入口 -->
+  <div class="upload-cards" id="uploadCards">
+    <!-- 上传文件 -->
+    <div class="upload-card" onclick="document.getElementById('fileInput').click()">
+      <div class="icon">📄</div>
+      <h3>上传 PDF 文件</h3>
+      <p>选择多个 PDF 文件<br>所有文件合并为一个 Excel</p>
+    </div>
+    <input type="file" id="fileInput" accept=".pdf" multiple onchange="handleFiles(this.files, 'files')">
+
+    <!-- 上传文件夹 -->
+    <div class="upload-card" onclick="document.getElementById('folderInput').click()">
+      <div class="icon">📁</div>
+      <h3>上传 PDF 文件夹</h3>
+      <p>选择包含 PDF 的文件夹<br>保留子文件夹结构</p>
+    </div>
+    <input type="file" id="folderInput" accept=".pdf" webkitdirectory multiple onchange="handleFiles(this.files, 'folder')">
+  </div>
+
+  <!-- 已选文件提示 -->
+  <div id="selectedInfo" style="display:none; text-align:center;">
+    <div class="file-badge">
+      📎 已选择 <span class="count" id="fileCount">0</span> 个 PDF 文件
+      <button class="btn btn-outline" onclick="resetSelection()" style="margin-left:8px;">重新选择</button>
+    </div>
+    <div style="margin-bottom:16px;">
+      <button class="btn btn-primary" id="startBtn" onclick="startUpload()">🚀 开始识别</button>
+    </div>
+  </div>
+
+  <!-- 进度 -->
+  <div class="progress-section" id="progressSection">
+    <div class="progress-card">
+      <div class="progress-text" id="progressMsg">准备中...</div>
+      <div class="progress-bar-wrap"><div class="progress-bar-fill" id="progressBar"></div></div>
+    </div>
+  </div>
+
+  <!-- 结果 -->
+  <div class="result-section" id="resultSection">
+    <div class="result-card">
+      <div class="summary">
+        <div class="stat"><div class="num" id="statSuccess">0</div><div class="label">成功</div></div>
+        <div class="stat"><div class="num" id="statTotal">0</div><div class="label">总数</div></div>
+        <div class="stat"><div class="num" id="statAmount">¥0</div><div class="label">合计</div></div>
+      </div>
+      <div id="errorBox"></div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr>
+            <th>发票号码</th><th>开票日期</th><th>购买方</th><th>销售方</th>
+            <th>价税合计</th><th>手机号</th><th>计费时段</th><th>方式</th>
+          </tr></thead>
+          <tbody id="resultTable"></tbody>
+        </table>
+      </div>
+      <a class="btn-download" id="downloadLink" style="display:none" href="#">📥 下载 Excel</a>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let pendingFiles = null;
+  let uploadMode = null;
+  let taskId = null;
+  let pollTimer = null;
+
+  function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function filterPdfFiles(files) {
+    return Array.from(files || []).filter(f =>
+      f.name && f.name.toLowerCase().endsWith('.pdf')
+    );
+  }
+
+  function handleFiles(files, mode) {
+    const pdfs = filterPdfFiles(files);
+    if (pdfs.length === 0) {
+      alert('未找到 PDF 文件，请选择 .pdf 格式的发票文件');
+      return;
+    }
+    pendingFiles = pdfs;
+    uploadMode = mode;
+    document.getElementById('fileCount').textContent = pdfs.length;
+    document.getElementById('selectedInfo').style.display = '';
+    document.getElementById('uploadCards').style.display = 'none';
+  }
+
+  function resetSelection() {
+    pendingFiles = null; uploadMode = null;
+    document.getElementById('selectedInfo').style.display = 'none';
+    document.getElementById('uploadCards').style.display = '';
+    document.getElementById('fileInput').value = '';
+    document.getElementById('folderInput').value = '';
+  }
+
+  async function startUpload() {
+    if (!pendingFiles) return;
+    const btn = document.getElementById('startBtn');
+    btn.disabled = true; btn.textContent = '⏳ 上传中...';
+
+    const form = new FormData();
+    for (const f of pendingFiles) form.append('files', f);
+
+    const endpoint = uploadMode === 'folder' ? '/api/upload-folder' : '/api/upload-files';
+
+    try {
+      const resp = await fetch(endpoint, { method: 'POST', body: form });
+      const data = await resp.json();
+      if (!data.ok) { showError(data.error); btn.disabled = false; btn.textContent = '🚀 开始识别'; return; }
+
+      taskId = data.task_id;
+      document.getElementById('progressSection').classList.add('active');
+      document.getElementById('resultSection').classList.remove('active');
+      document.getElementById('selectedInfo').style.display = 'none';
+      document.getElementById('errorBox').innerHTML = '';
+
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(poll, 500);
+      poll();
+    } catch (e) {
+      showError('上传失败: ' + e.message);
+      btn.disabled = false; btn.textContent = '🚀 开始识别';
+    }
+  }
+
+  async function poll() {
+    if (!taskId) return;
+    try {
+      const resp = await fetch('/api/status/' + taskId);
+      const d = await resp.json();
+      document.getElementById('progressBar').style.width = (d.progress||0) + '%';
+      document.getElementById('progressMsg').textContent = d.message || '处理中...';
+
+      if (d.status === 'done') {
+        clearInterval(pollTimer);
+        document.getElementById('progressSection').classList.remove('active');
+        showResults(d);
+        resetSelection();
+      } else if (d.status === 'error') {
+        clearInterval(pollTimer);
+        document.getElementById('progressSection').classList.remove('active');
+        showError(d.error);
+        document.getElementById('selectedInfo').style.display = '';
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('startBtn').textContent = '🚀 开始识别';
+      }
+    } catch (e) { clearInterval(pollTimer); }
+  }
+
+  function showResults(d) {
+    document.getElementById('resultSection').classList.add('active');
+    document.getElementById('statSuccess').textContent = d.success || 0;
+    document.getElementById('statTotal').textContent = (d.invoices||[]).length;
+    document.getElementById('statAmount').textContent = '¥' + (d.total||0).toLocaleString('zh-CN', {minimumFractionDigits:2});
+
+    document.getElementById('resultTable').innerHTML = (d.invoices||[]).map(inv => {
+      const badge = inv.extraction_method === 'OCR'
+        ? '<span class="badge badge-ocr">OCR</span>'
+        : '<span class="badge badge-ok">pdf</span>';
+      const seller = escapeHtml((inv.seller_name || '-').substring(0, 20));
+      return `<tr>
+        <td>${escapeHtml(inv.invoice_number || '-')}</td><td>${escapeHtml(inv.invoice_date || '-')}</td>
+        <td>${escapeHtml(inv.buyer_name || '-')}</td><td>${seller}</td>
+        <td style="text-align:right">¥${escapeHtml(inv.total_with_tax || '0')}</td>
+        <td>${escapeHtml(inv.phone_number || '-')}</td><td>${escapeHtml(inv.billing_period || '-')}</td>
+        <td>${badge}</td></tr>`;
+    }).join('');
+
+    const link = document.getElementById('downloadLink');
+    link.style.display = 'inline-block';
+    link.href = '/api/download/' + taskId;
+  }
+
+  function showError(msg) {
+    document.getElementById('resultSection').classList.add('active');
+    document.getElementById('errorBox').innerHTML =
+      '<div class="error-msg">❌ ' + escapeHtml(msg) + '</div>';
+  }
+</script>
+
+</body>
+</html>

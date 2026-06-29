@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 上传和输出目录（包含用户隐私数据）
+uploads/
+excel/
+
+# OCR 缓存
+.paddleocr/
+.paddlex/
+.cache/
+.EasyOCR/
+
+# 大文件
+*.exe
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 临时文件
+*.tmp
+*.log
