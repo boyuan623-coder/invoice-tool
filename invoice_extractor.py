@@ -234,6 +234,172 @@ def _ocr_page_text(ocr, fitz_page, page_label: str = '') -> str:
             pass
 
 
+def _extract_receipt_number(text: str) -> str:
+    """提取财政/医疗电子票据号码（票据号码），兼容 OCR 误识别。"""
+    norm = _normalize_match_text(text)
+    compact = re.sub(r'\s+', '', norm)
+
+    patterns = [
+        r'票据号码[：:.]\s*(\d{6,30})',
+        r'票据号[码马][：:.]\s*(\d{6,30})',
+        r'柔据号[码马][：:.]\s*(\d{6,30})',
+        r'票[据櫃][号码码]+[：:.]\s*(\d{6,30})',
+        r'(?<![代码代马])号码[：:.](\d{6,30})',
+        r'(?<![代码代马])号码(\d{8,12})',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, compact)
+        if m:
+            return m.group(1)
+
+    m = re.search(r'票据号[码马][：:OIlB.]*([0-9OIlB]{6,30})', compact)
+    if m:
+        raw = m.group(1)
+        trans = str.maketrans({'O': '0', 'o': '0', 'I': '1', 'l': '1', 'B': '8'})
+        num = raw.translate(trans)
+        num = re.sub(r'[^0-9]', '', num)
+        if len(num) >= 6:
+            return num
+    return ''
+
+
+def _normalize_ocr_text(text: str) -> str:
+    """修正常见 OCR 误识别，便于后续字段提取。"""
+    if not text:
+        return ''
+    fixes = [
+        ('开东日期', '开票日期'),
+        ('开票月期', '开票日期'),
+        ('收款单住', '收款单位'),
+        ('收杖单位', '收款单位'),
+        ('收狄单位', '收款单位'),
+        ('收欣单位', '收款单位'),
+        ('文款人、', '文款人：'),
+        ('文款人,', '文款人：'),
+        ('文秋人、', '文秋人：'),
+        ('交款人—', '交款人：'),
+        ('交款人-', '交款人：'),
+        ('此诊日期', '就诊日期'),
+    ]
+    for old, new in fixes:
+        text = text.replace(old, new)
+    return text
+
+
+def _looks_like_person_name(name: str) -> bool:
+    """判断字符串是否像中文人名。"""
+    if not name or len(name) < 2 or len(name) > 8:
+        return False
+    if re.search(r'社会信用|校验|票据|代码|开票|统一|项目|卫生院|医院|公司|门诊|体检', name):
+        return False
+    if re.fullmatch(r'[\d*~.]+', name):
+        return False
+    return bool(re.search(r'[\u4e00-\u9fff]', name))
+
+
+def _parse_compact_date(raw: str) -> str:
+    """将 YYYYMMDD / 缺位 YYYMMDD 转为 YYYY-MM-DD。"""
+    digits = re.sub(r'\D', '', raw or '')
+    if len(digits) == 7:
+        if digits.startswith('206'):
+            digits = '2026' + digits[3:]
+        elif digits.startswith('205'):
+            digits = '2025' + digits[3:]
+        elif digits.startswith('204'):
+            digits = '2024' + digits[3:]
+        elif digits.startswith('20'):
+            digits = digits[:4] + '0' + digits[4:]
+    if len(digits) == 8:
+        return f'{digits[:4]}-{digits[4:6]}-{digits[6:8]}'
+    return ''
+
+
+def _extract_invoice_date(text: str) -> str:
+    """提取开票日期，兼容 OCR 误识别及就诊日期回退。"""
+    norm = _normalize_match_text(_normalize_ocr_text(text))
+
+    m = re.search(r'开[票东]日期[：:.]?\s*(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})', norm)
+    if m:
+        return f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
+
+    m = re.search(r'开[票东]日期[：:.]?\s*(\d{7,8})', norm)
+    if m:
+        parsed = _parse_compact_date(m.group(1))
+        if parsed:
+            return parsed
+
+    m = re.search(r'开[票东]日期[：:.]?\s*\n\s*(\d{8})', norm)
+    if m:
+        parsed = _parse_compact_date(m.group(1))
+        if parsed:
+            return parsed
+
+    for pattern in (r'就诊日期[：:.]?\s*(\d{8})', r'就诊日期[：:.]?\s*(\d{4})(\d{2})(\d{2})'):
+        m = re.search(pattern, norm)
+        if m:
+            if m.lastindex == 1:
+                parsed = _parse_compact_date(m.group(1))
+                if parsed:
+                    return parsed
+            else:
+                return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return ''
+
+
+def _extract_payer_name(text: str) -> str:
+    """提取财政票据交款人，兼容 OCR 误识别及姓名换行。"""
+    norm = _normalize_match_text(_normalize_ocr_text(text))
+    cn_name = r'[\u4e00-\u9fff·]{2,8}'
+
+    inline_patterns = [
+        rf'[交文又][款此秋北止使武达]人[：:.、]\s*({cn_name})',
+        rf'文人[：:.]\s*({cn_name})',
+        rf'又北人[：:.]\s*({cn_name})',
+        rf'交[北武]人[：:.]\s*({cn_name})',
+        rf'交款人[：:.]\s*({cn_name})',
+        rf'[交文又][款此秋北止使武达][人]([\u4e00-\u9fff·]{{2,4}})',
+        rf'文达人([\u4e00-\u9fff·]{{2,4}})',
+    ]
+    for pattern in inline_patterns:
+        for m in re.finditer(pattern, norm):
+            name = _clean_name(m.group(1).split('统一')[0].split('校验')[0])
+            if _looks_like_person_name(name):
+                return name
+
+    multiline_patterns = [
+        rf'久止人\s*\n\s*({cn_name})',
+        rf'(?:[交文又][款此秋北止使武达]人|文人)\s*\n\s*({cn_name})',
+    ]
+    for pattern in multiline_patterns:
+        m = re.search(pattern, norm)
+        if m:
+            name = _clean_name(m.group(1))
+            if _looks_like_person_name(name):
+                return name
+    return ''
+
+
+def _extract_receipt_seller(text: str) -> str:
+    """提取财政票据收款单位，兼容 OCR 误识别。"""
+    norm = _normalize_ocr_text(text)
+    patterns = [
+        r'收款单位[：:]\s*(.+?)(?:\n|复核人|核人|$)',
+        r'收[款杖狄]?单?[位住][：:]\s*(.+?)(?:\n|复核人|核人|$)',
+        r'收款单位\s*\n\s*([^\n]+)',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, norm, re.DOTALL)
+        if m:
+            name = _clean_name(m.group(1).split('\n')[0])
+            if name and re.search(r'卫生院|医院|中心|诊所', name):
+                return name
+
+    m = re.search(r'备注[：:][^\n]*?([\u4e00-\u9fff]{2,24}(?:卫生院|医院|中心))', norm)
+    if m:
+        return _clean_name(m.group(1))
+    return ''
+
+
 def _extract_invoice_number(text: str) -> str:
     """提取发票号码，兼容 OCR 误识别（空格、全角冒号等）。"""
     norm = _normalize_match_text(text)
@@ -243,11 +409,18 @@ def _extract_invoice_number(text: str) -> str:
         r'发票号码[：:]\s*(\d{8,30})',
         r'发票号码[：:]*([0-9]{8,30})',
         r'发票号码\s*[:：]?\s*(\d{8,30})',
+        # 部分 PDF 排版：号码在「发票号码」标签上一行
+        r'(\d{8,30})\s*发票号码[：:]?',
     ]
     for pattern in patterns:
         m = re.search(pattern, compact)
         if m:
             return m.group(1)
+
+    # 独立长数字行紧邻「发票号码」标签（pdfplumber 换行排版）
+    m = re.search(r'(\d{17,30})\s*\n\s*发票号码', norm)
+    if m:
+        return m.group(1)
 
     # OCR 可能把数字 0 识别成 O
     m = re.search(r'发票号码[：:OIlB]*([0-9OIlB]{8,30})', compact)
@@ -258,7 +431,8 @@ def _extract_invoice_number(text: str) -> str:
         num = re.sub(r'[^0-9]', '', num)
         if len(num) >= 8:
             return num
-    return ''
+
+    return _extract_receipt_number(text)
 
 
 def _get_ocr():
@@ -461,8 +635,33 @@ def _is_non_invoice_page(text: str) -> bool:
     return False
 
 
+def _is_fiscal_receipt_page(text: str) -> bool:
+    """判断是否为财政/医疗门诊电子票据（票据号码 + 开票日期/金额）。"""
+    compact = re.sub(r'\s+', '', _normalize_match_text(text))
+    has_receipt_number = bool(_extract_receipt_number(text))
+    if not has_receipt_number:
+        return False
+
+    has_receipt_title = bool(re.search(
+        r'医疗.*收费票据|财政电子票据|门诊收费票据|浙江省医疗',
+        compact,
+    ))
+    has_payer = bool(re.search(r'交款人|交此人|文款人|文秋人', compact))
+    has_amount = bool(re.search(r'金额合计|小写', compact))
+    has_date = bool(re.search(r'开票日期', compact))
+
+    if has_receipt_title:
+        return True
+    if has_receipt_number and has_date and (has_payer or has_amount):
+        return True
+    return False
+
+
 def _is_invoice_page(text: str, source: str = 'text') -> bool:
     """判断页面是否为电子发票（必须有发票号码等核心特征）"""
+    if _is_fiscal_receipt_page(text):
+        return True
+
     compact = re.sub(r'\s+', '', _normalize_match_text(text))
 
     has_invoice_number = bool(_extract_invoice_number(text))
@@ -507,15 +706,14 @@ def _classify_page(text: str, source: str = 'text') -> str:
 
 def _extract_fields(text: str, info: InvoiceInfo):
     """从文本中提取发票字段（适用于 pdfplumber 和 OCR 文本）"""
+    text = _normalize_ocr_text(text)
     norm = _normalize_match_text(text)
 
     # 1. 发票号码
     info.invoice_number = _extract_invoice_number(text)
 
     # 2. 开票日期
-    m = re.search(r'开票日期[：:]\s*(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})日?', norm)
-    if m:
-        info.invoice_date = f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
+    info.invoice_date = _extract_invoice_date(text)
 
     # 3. 购买方名称、4. 销售方名称
     #    先判断文本格式：pdfplumber 排版（购/销交叉）还是 OCR 排版（购买方/销售方分块）
@@ -551,7 +749,9 @@ def _extract_fields(text: str, info: InvoiceInfo):
         # 文本格式: 销售方信息\n购买方信息\n名称：中国移动...\n名称：张娇洋
         # 用公司关键词区分：包含"公司"→销售方，否则→购买方
 
-        all_name_matches = list(re.finditer(r'名称[：:]\s*(.+)', text))
+        all_name_matches = list(re.finditer(
+            r'名称[：:]\s*(.+?)(?=\s+名称[：:]|$)', text, re.DOTALL
+        ))
         buyer_candidates = []
         seller_candidates = []
 
@@ -597,6 +797,12 @@ def _extract_fields(text: str, info: InvoiceInfo):
                 if name and not any(kw in name for kw in company_keywords):
                     info.buyer_name = name
 
+    # 财政/医疗电子票据：交款人、收款单位
+    if not info.buyer_name:
+        info.buyer_name = _extract_payer_name(text)
+    if not info.seller_name:
+        info.seller_name = _extract_receipt_seller(text)
+
     # 5. 合计金额（不含税）
     m = re.search(r'合\s*计\s*[¥￥]\s*([\d,]+\.?\d*)', text)
     if m:
@@ -607,9 +813,23 @@ def _extract_fields(text: str, info: InvoiceInfo):
     if m:
         info.total_with_tax = m.group(1).replace(',', '')
     else:
-        m = re.search(r'[（(]小写[）)]\s*[¥￥]\s*([\d,]+\.?\d*)', text)
+        m = re.search(r'[（(]小写[）)]\s*[¥￥]?\s*(\d+\.\d{2})', text)
         if m:
             info.total_with_tax = m.group(1).replace(',', '')
+    if not info.total_with_tax:
+        m = re.search(r'[（(]小写[）)]\s*[¥￥]?\s*([\d,]+\.?\d*)', text)
+        if m:
+            info.total_with_tax = m.group(1).replace(',', '')
+    if not info.total_with_tax:
+        m = re.search(r'金额合计.*?[（(]小写[）)]\s*([\d,]+\.?\d*)', text, re.DOTALL)
+        if m:
+            info.total_with_tax = m.group(1).replace(',', '')
+    if not info.total_with_tax or (
+        info.total_with_tax.isdigit() and len(info.total_with_tax) >= 5
+    ):
+        m = re.search(r'个人[见现]?金支付[：:]\s*(\d+\.\d{2})', text)
+        if m:
+            info.total_with_tax = m.group(1)
 
     # 7. 手机号码
     #    多种格式：电话号码：13829968804 / 电话：13829968804 / 电话号码:13829968804（OCR 紧凑格式）
@@ -623,6 +843,10 @@ def _extract_fields(text: str, info: InvoiceInfo):
     # 手机号码也出现在页面独立区域，OCR 可能识别为单独一行
     if not info.phone_number:
         m = re.search(r'手机号码[：:]\s*(\d{11})', text)
+        if m:
+            info.phone_number = m.group(1)
+    if not info.phone_number:
+        m = re.search(r'业务号码[：:]\s*(\d{11})', text)
         if m:
             info.phone_number = m.group(1)
 
@@ -640,6 +864,11 @@ def _extract_fields(text: str, info: InvoiceInfo):
         m = re.search(r'计费[时段周期]+[：:]\s*(\d{4})[年/-](\d{2})', text)
         if m:
             info.billing_period = f"{m.group(1)}-{m.group(2).zfill(2)}"
+    if not info.billing_period:
+        m = re.search(r'账期[：:]\s*(\d{6})', text)
+        if m:
+            period = m.group(1)
+            info.billing_period = f"{period[:4]}-{period[4:6]}"
 
 
 def _build_invoice_from_text(full_text, table_text, pdf_path, source_folder, method):
