@@ -79,11 +79,22 @@ invoice_tool.bat
 # 浏览器自动打开 http://127.0.0.1:5000
 ```
 
+### 分享给非本机用户（无需云服务器）
+
+```bash
+# 双击启动分享模式
+invoice_tool_share.bat
+# 或: python app.py --share
+# 约 10～30 秒后窗口显示 https://xxxx.trycloudflare.com
+# 把链接发给对方即可；关闭窗口后链接失效
+```
+
 ### 命令行启动（可选）
 
 ```bash
 pip install -r requirements.txt
 python app.py
+python app.py --share   # 外网临时链接
 ```
 
 ---
@@ -160,6 +171,8 @@ python app.py
 ├── invoice_extractor.py    # 核心识别逻辑
 ├── requirements.txt        # Python 依赖清单
 ├── invoice_tool.bat        # 日常启动脚本（双击即用）
+├── invoice_tool_share.bat  # 外网分享启动（无需云服务器）
+├── tunnel_share.py         # Cloudflare 临时隧道
 ├── setup.cmd               # 首次环境自动安装
 ├── setup.bat               # 备用安装脚本
 ├── 修复OCR缓存.bat          # OCR 异常时一键修复

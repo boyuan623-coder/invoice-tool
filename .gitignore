@@ -23,14 +23,18 @@ env/
 uploads/
 excel/
 
+# 本地备份
+backup/
+
 # OCR 缓存
 .paddleocr/
 .paddlex/
 .cache/
 .EasyOCR/
 
-# 大文件
+# 大文件 / 本地下载的隧道工具
 *.exe
+tools/
 
 # 系统文件
 Thumbs.db
@@ -40,3 +44,17 @@ desktop.ini
 # 临时文件
 *.tmp
 *.log
+*.pid
+
+# 云部署口令（勿提交）
+.env
+deploy/invoice-tool.env
+
+# Cloudflare 隧道凭证（含私钥，勿提交）
+.cloudflared/
+
+# 本地测试用发票/图片（含个人信息，勿提交）
+pdf/
+image/
+Open/
+Open

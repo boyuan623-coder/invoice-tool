@@ -1,0 +1,32 @@
+# 安装到系统服务（在服务器上执行）:
+#   1. 把本仓库放到 /opt/invoice-tool（或改下面路径）
+#   2. cp deploy/env.example deploy/invoice-tool.env 并填写口令
+#   3. bash deploy/start_cloud.sh --install-only
+#   4. sudo cp deploy/invoice-tool.service /etc/systemd/system/
+#   5. 按实际用户/路径编辑 /etc/systemd/system/invoice-tool.service
+#   6. sudo systemctl daemon-reload
+#   7. sudo systemctl enable --now invoice-tool
+#   8. sudo systemctl status invoice-tool
+
+[Unit]
+Description=Electronic Invoice OCR Tool
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/invoice-tool
+EnvironmentFile=-/opt/invoice-tool/deploy/invoice-tool.env
+Environment=INVOICE_TOOL_CLOUD=1
+Environment=INVOICE_TOOL_LOW_MEM=1
+Environment=INVOICE_TOOL_NO_BROWSER=1
+Environment=INVOICE_TOOL_DEVICE=cpu
+ExecStart=/opt/invoice-tool/.venv/bin/python /opt/invoice-tool/app.py --cloud --low-mem --host 0.0.0.0 --port 5000
+Restart=always
+RestartSec=5
+# OCR / 大文件上传可能较久
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

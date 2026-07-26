@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>电子发票识别工具</title>
+<title>识别工具 · 发票 / 表格</title>
 <style>
   :root {
     --primary: #4f6ef7;
@@ -99,40 +99,126 @@
   }
   .btn-download:hover { background: #059669; }
   .error-msg { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; padding: 12px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
+
+  /* 识别模式 */
+  .mode-section { margin-bottom: 20px; text-align: center; }
+  .mode-label { font-size: 13px; color: var(--text2); margin-bottom: 8px; }
+  .mode-switch {
+    display: inline-flex; background: var(--card); border: 1.5px solid var(--border);
+    border-radius: 10px; padding: 4px; gap: 2px;
+  }
+  .mode-btn {
+    border: none; background: transparent; color: var(--text2);
+    padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s; line-height: 1.3;
+  }
+  .mode-btn small { display: block; font-size: 11px; font-weight: 400; opacity: 0.75; margin-top: 2px; }
+  .mode-btn:hover { color: var(--primary); }
+  .mode-btn.active { background: var(--primary); color: #fff; }
+  .mode-btn.active small { opacity: 0.9; }
+  @media (max-width: 480px) {
+    .mode-btn { padding: 8px 10px; font-size: 12px; }
+  }
+
+  .feature-section { margin-bottom: 18px; text-align: center; }
+  .feature-switch {
+    display: inline-flex; background: var(--card); border: 1.5px solid var(--border);
+    border-radius: 10px; padding: 4px; gap: 2px;
+  }
+  .feature-btn {
+    border: none; background: transparent; color: var(--text2);
+    padding: 10px 22px; border-radius: 8px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .feature-btn:hover { color: var(--primary); }
+  .feature-btn.active { background: var(--primary); color: #fff; }
+  .ocr-quality-wrap.hide { display: none; }
+  .table-file-list { margin-top: 12px; text-align: left; font-size: 13px; }
+  .table-file-list a { color: var(--primary); text-decoration: none; }
+  .table-file-list a:hover { text-decoration: underline; }
+  .table-file-list li { padding: 6px 0; border-bottom: 1px solid #f3f4f6; }
+
+  .auth-gate {
+    display: none; background: var(--card); border-radius: var(--radius);
+    padding: 20px 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    text-align: center;
+  }
+  .auth-gate.show { display: block; }
+  .auth-gate input {
+    width: min(320px, 100%); padding: 10px 12px; border: 1.5px solid var(--border);
+    border-radius: 8px; font-size: 14px; margin: 10px 8px 0 0;
+  }
+  .auth-gate .hint { font-size: 12px; color: var(--text2); margin-top: 8px; }
+  .main-app.blurred { opacity: 0.35; pointer-events: none; filter: grayscale(0.2); }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1>📄 电子发票识别工具</h1>
-  <p>上传 PDF → 自动识别 → 导出 Excel</p>
+  <h1 id="pageTitle">📄 电子发票识别工具</h1>
+  <p id="pageSubtitle">上传 PDF / 图片 → 自动识别 → 导出 Excel</p>
 </div>
 
 <div class="container">
+
+  <div class="auth-gate" id="authGate">
+    <div style="font-size:14px;font-weight:600;">🔒 请输入访问口令</div>
+    <div>
+      <input type="password" id="accessTokenInput" placeholder="访问口令" autocomplete="current-password">
+      <button type="button" class="btn btn-primary" style="padding:10px 18px;" onclick="saveAccessToken()">进入</button>
+    </div>
+    <div class="hint">由服务器环境变量 INVOICE_TOOL_ACCESS_TOKEN 设置；口令仅保存在本浏览器。</div>
+  </div>
+
+  <div class="main-app" id="mainApp">
+
+  <!-- 功能模式：发票 / 表格 -->
+  <div class="feature-section">
+    <div class="feature-switch" role="radiogroup" aria-label="功能模式">
+      <button type="button" class="feature-btn active" id="featInvoice" onclick="setFeatureMode('invoice')">发票识别</button>
+      <button type="button" class="feature-btn" id="featTable" onclick="setFeatureMode('table')">表格转 Excel</button>
+    </div>
+  </div>
+
+  <!-- 识别模式（发票/表格共用 OCR 档位） -->
+  <div class="mode-section ocr-quality-wrap" id="ocrQualityWrap">
+    <div class="mode-label">识别模式</div>
+    <div class="mode-switch" role="radiogroup" aria-label="识别模式">
+      <button type="button" class="mode-btn" data-mode="fast" onclick="setOcrMode('fast')" role="radio" aria-checked="false">
+        速度<small>更快</small>
+      </button>
+      <button type="button" class="mode-btn active" data-mode="balanced" onclick="setOcrMode('balanced')" role="radio" aria-checked="true">
+        平衡<small>默认</small>
+      </button>
+      <button type="button" class="mode-btn" data-mode="accurate" onclick="setOcrMode('accurate')" role="radio" aria-checked="false">
+        精度<small>更准</small>
+      </button>
+    </div>
+  </div>
 
   <!-- 两个上传入口 -->
   <div class="upload-cards" id="uploadCards">
     <!-- 上传文件 -->
     <div class="upload-card" onclick="document.getElementById('fileInput').click()">
-      <div class="icon">📄</div>
-      <h3>上传 PDF 文件</h3>
-      <p>选择多个 PDF 文件<br>所有文件合并为一个 Excel</p>
+      <div class="icon" id="uploadFileIcon">📄</div>
+      <h3 id="uploadFileTitle">上传发票文件</h3>
+      <p id="uploadFileDesc">选择 PDF 或图片（JPG/PNG）<br>所有文件合并为一个 Excel</p>
     </div>
-    <input type="file" id="fileInput" accept=".pdf" multiple onchange="handleFiles(this.files, 'files')">
+    <input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,image/*" multiple onchange="handleFiles(this.files, 'files')">
 
     <!-- 上传文件夹 -->
     <div class="upload-card" onclick="document.getElementById('folderInput').click()">
       <div class="icon">📁</div>
-      <h3>上传 PDF 文件夹</h3>
-      <p>选择包含 PDF 的文件夹<br>保留子文件夹结构</p>
+      <h3 id="uploadFolderTitle">上传发票文件夹</h3>
+      <p id="uploadFolderDesc">选择含 PDF 或图片的文件夹<br>保留子文件夹结构</p>
     </div>
-    <input type="file" id="folderInput" accept=".pdf" webkitdirectory multiple onchange="handleFiles(this.files, 'folder')">
+    <input type="file" id="folderInput" accept=".pdf,.jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,image/*" webkitdirectory multiple onchange="handleFiles(this.files, 'folder')">
   </div>
 
   <!-- 已选文件提示 -->
   <div id="selectedInfo" style="display:none; text-align:center;">
     <div class="file-badge">
-      📎 已选择 <span class="count" id="fileCount">0</span> 个 PDF 文件
+      📎 已选择 <span class="count" id="fileCount">0</span> 个文件
       <button class="btn btn-outline" onclick="resetSelection()" style="margin-left:8px;">重新选择</button>
     </div>
     <div style="margin-bottom:16px;">
@@ -154,10 +240,10 @@
       <div class="summary">
         <div class="stat"><div class="num" id="statSuccess">0</div><div class="label">成功</div></div>
         <div class="stat"><div class="num" id="statTotal">0</div><div class="label">总数</div></div>
-        <div class="stat"><div class="num" id="statAmount">¥0</div><div class="label">合计</div></div>
+        <div class="stat" id="statAmountWrap"><div class="num" id="statAmount">¥0</div><div class="label">合计</div></div>
       </div>
       <div id="errorBox"></div>
-      <div style="overflow-x:auto;">
+      <div id="invoiceResultWrap" style="overflow-x:auto;">
         <table>
           <thead><tr>
             <th>发票号码</th><th>开票日期</th><th>购买方</th><th>销售方</th>
@@ -166,9 +252,14 @@
           <tbody id="resultTable"></tbody>
         </table>
       </div>
+      <div id="tableResultWrap" style="display:none;">
+        <ul class="table-file-list" id="tableFileList"></ul>
+      </div>
       <a class="btn-download" id="downloadLink" style="display:none" href="#">📥 下载 Excel</a>
     </div>
   </div>
+
+  </div><!-- #mainApp -->
 
 </div>
 
@@ -177,6 +268,140 @@
   let uploadMode = null;
   let taskId = null;
   let pollTimer = null;
+  let pollEpoch = 0; // 防止上一次任务的异步轮询干扰下一次
+  let ocrMode = 'balanced';
+  let featureMode = 'invoice'; // invoice | table
+  const ACCESS_TOKEN_REQUIRED = {{ 'true' if access_token_required else 'false' }};
+  const TOKEN_STORAGE_KEY = 'invoice_tool_access_token';
+
+  function getAccessToken() {
+    try {
+      return (localStorage.getItem(TOKEN_STORAGE_KEY) || '').trim();
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function authHeaders(extra) {
+    const headers = Object.assign({}, extra || {});
+    const token = getAccessToken();
+    if (token) headers['X-Access-Token'] = token;
+    return headers;
+  }
+
+  function withToken(url) {
+    const token = getAccessToken();
+    if (!token) return url;
+    const join = url.indexOf('?') >= 0 ? '&' : '?';
+    return url + join + 'token=' + encodeURIComponent(token);
+  }
+
+  function refreshAuthGate() {
+    const gate = document.getElementById('authGate');
+    const main = document.getElementById('mainApp');
+    if (!ACCESS_TOKEN_REQUIRED) {
+      gate.classList.remove('show');
+      main.classList.remove('blurred');
+      return;
+    }
+    const ok = !!getAccessToken();
+    gate.classList.toggle('show', !ok);
+    main.classList.toggle('blurred', !ok);
+    if (!ok) {
+      const input = document.getElementById('accessTokenInput');
+      if (input) setTimeout(() => input.focus(), 50);
+    }
+  }
+
+  function saveAccessToken() {
+    const input = document.getElementById('accessTokenInput');
+    const token = (input && input.value || '').trim();
+    if (!token) {
+      alert('请输入访问口令');
+      return;
+    }
+    try {
+      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    } catch (e) { /* ignore */ }
+    refreshAuthGate();
+  }
+
+  function apiFetch(url, options) {
+    const opts = Object.assign({}, options || {});
+    opts.headers = authHeaders(opts.headers || {});
+    return fetch(url, opts);
+  }
+
+  refreshAuthGate();
+  (function bindTokenEnter() {
+    const input = document.getElementById('accessTokenInput');
+    if (input) {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') saveAccessToken();
+      });
+    }
+  })();
+
+  function setFeatureMode(mode) {
+    featureMode = (mode === 'table') ? 'table' : 'invoice';
+    document.getElementById('featInvoice').classList.toggle('active', featureMode === 'invoice');
+    document.getElementById('featTable').classList.toggle('active', featureMode === 'table');
+
+    if (featureMode === 'table') {
+      document.getElementById('pageTitle').textContent = '📊 表格转 Excel';
+      document.getElementById('pageSubtitle').textContent = '上传表格截图 → 每张图生成同名 Excel';
+      document.getElementById('uploadFileIcon').textContent = '🖼️';
+      document.getElementById('uploadFileTitle').textContent = '上传表格图片';
+      document.getElementById('uploadFileDesc').innerHTML = '选择 JPG / PNG 等图片<br>每张图生成一个同名 Excel';
+      document.getElementById('uploadFolderTitle').textContent = '上传图片文件夹';
+      document.getElementById('uploadFolderDesc').innerHTML = '选择含表格截图的文件夹<br>按图片逐张导出 Excel';
+      document.getElementById('fileInput').accept = '.jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,image/*';
+      document.getElementById('folderInput').accept = '.jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,image/*';
+      document.getElementById('startBtn').textContent = '🚀 开始转换';
+    } else {
+      document.getElementById('pageTitle').textContent = '📄 电子发票识别工具';
+      document.getElementById('pageSubtitle').textContent = '上传 PDF / 图片 → 自动识别 → 导出 Excel';
+      document.getElementById('uploadFileIcon').textContent = '📄';
+      document.getElementById('uploadFileTitle').textContent = '上传发票文件';
+      document.getElementById('uploadFileDesc').innerHTML = '选择 PDF 或图片（JPG/PNG）<br>所有文件合并为一个 Excel';
+      document.getElementById('uploadFolderTitle').textContent = '上传发票文件夹';
+      document.getElementById('uploadFolderDesc').innerHTML = '选择含 PDF 或图片的文件夹<br>保留子文件夹结构';
+      document.getElementById('fileInput').accept = '.pdf,.jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,image/*';
+      document.getElementById('folderInput').accept = '.pdf,.jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,image/*';
+      document.getElementById('startBtn').textContent = '🚀 开始识别';
+    }
+    resetSelection();
+    document.getElementById('resultSection').classList.remove('active');
+    document.getElementById('progressSection').classList.remove('active');
+  }
+
+  function apiBase() {
+    return featureMode === 'table' ? '/api/table' : '/api';
+  }
+
+  function setOcrMode(mode) {
+    if (mode !== 'fast' && mode !== 'balanced' && mode !== 'accurate') mode = 'balanced';
+    ocrMode = mode;
+    document.querySelectorAll('.mode-btn').forEach((btn) => {
+      const on = btn.dataset.mode === mode;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+  }
+
+  function resetStartButton() {
+    const btn = document.getElementById('startBtn');
+    btn.disabled = false;
+    btn.textContent = featureMode === 'table' ? '🚀 开始转换' : '🚀 开始识别';
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    pollEpoch += 1;
+  }
 
   function escapeHtml(str) {
     if (str == null) return '';
@@ -188,23 +413,35 @@
       .replace(/'/g, '&#39;');
   }
 
-  function filterPdfFiles(files) {
-    return Array.from(files || []).filter(f =>
-      f.name && f.name.toLowerCase().endsWith('.pdf')
-    );
+  const INVOICE_EXTS = ['.pdf', '.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'];
+  const TABLE_EXTS = ['.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'];
+
+  function filterInvoiceFiles(files) {
+    const exts = featureMode === 'table' ? TABLE_EXTS : INVOICE_EXTS;
+    return Array.from(files || []).filter(f => {
+      if (!f.name) return false;
+      const lower = f.name.toLowerCase();
+      return exts.some(ext => lower.endsWith(ext));
+    });
   }
 
   function handleFiles(files, mode) {
-    const pdfs = filterPdfFiles(files);
-    if (pdfs.length === 0) {
-      alert('未找到 PDF 文件，请选择 .pdf 格式的发票文件');
+    const invoiceFiles = filterInvoiceFiles(files);
+    if (invoiceFiles.length === 0) {
+      alert(featureMode === 'table'
+        ? '未找到图片文件，请选择 JPG / PNG 等'
+        : '未找到支持的文件，请选择 PDF 或图片（JPG/PNG 等）');
       return;
     }
-    pendingFiles = pdfs;
+    stopPolling();
+    pendingFiles = invoiceFiles;
     uploadMode = mode;
-    document.getElementById('fileCount').textContent = pdfs.length;
+    document.getElementById('fileCount').textContent = invoiceFiles.length;
     document.getElementById('selectedInfo').style.display = '';
     document.getElementById('uploadCards').style.display = 'none';
+    document.getElementById('progressSection').classList.remove('active');
+    document.getElementById('progressBar').style.width = '0%';
+    resetStartButton();
   }
 
   function resetSelection() {
@@ -213,67 +450,400 @@
     document.getElementById('uploadCards').style.display = '';
     document.getElementById('fileInput').value = '';
     document.getElementById('folderInput').value = '';
+    resetStartButton();
+  }
+
+  function setProgress(pct, msg) {
+    document.getElementById('progressSection').classList.add('active');
+    document.getElementById('progressBar').style.width = Math.max(0, Math.min(100, pct)) + '%';
+    document.getElementById('progressMsg').textContent = msg || '处理中...';
+  }
+
+  function formatBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+
+  /** 压缩大图，加快外网隧道上传（OCR 不需要原图像素级分辨率） */
+  function compressImageIfNeeded(file) {
+    const lower = (file.name || '').toLowerCase();
+    const isImg = /\.(jpe?g|png|webp|bmp)$/.test(lower);
+    // 更积极压缩：手机拍照发票通常很大，缩到 1600px / 72% 质量即可识别
+    if (!isImg || file.size < 350 * 1024) return Promise.resolve(file);
+
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const maxEdge = 1600;
+        let { width: w, height: h } = img;
+        const scale = Math.min(1, maxEdge / Math.max(w, h));
+        w = Math.max(1, Math.round(w * scale));
+        h = Math.max(1, Math.round(h * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        canvas.toBlob((blob) => {
+          if (!blob || blob.size >= file.size) {
+            resolve(file);
+            return;
+          }
+          const base = file.name.replace(/\.[^.]+$/, '');
+          resolve(new File([blob], base + '.jpg', { type: 'image/jpeg', lastModified: file.lastModified }));
+        }, 'image/jpeg', 0.72);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+      img.src = url;
+    });
+  }
+
+  function xhrPost(url, form, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      const token = getAccessToken();
+      if (token) xhr.setRequestHeader('X-Access-Token', token);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+      };
+      xhr.onload = () => {
+        const raw = (xhr.responseText || '').trim();
+        let data = null;
+        try {
+          data = JSON.parse(raw || '{}');
+        } catch (err) {
+          reject(new Error(explainGatewayError(xhr.status, raw)));
+          return;
+        }
+        if (xhr.status === 401) {
+          try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch (e) {}
+          refreshAuthGate();
+          reject(new Error((data && data.error) || '访问口令错误或已失效'));
+          return;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          if (data && data.ok === false) {
+            reject(new Error(data.error || '上传被拒绝'));
+            return;
+          }
+          resolve(data || {});
+        } else {
+          reject(new Error((data && data.error) || ('服务器错误 ' + xhr.status)));
+        }
+      };
+      xhr.onerror = () => reject(new Error('网络错误，请检查连接后重试'));
+      xhr.ontimeout = () => reject(new Error('上传超时，请减少文件数量后重试'));
+      xhr.timeout = 10 * 60 * 1000;
+      xhr.send(form);
+    });
+  }
+
+  function explainGatewayError(status, raw) {
+    const text = String(raw || '').slice(0, 120);
+    if (status === 524 || /error code:\s*524/i.test(text)) {
+      return '外网链路超时（524）。请稍后重试，或一次少传几个大文件';
+    }
+    if (status === 502 || status === 504 || /error code:\s*502/i.test(text) || /error code:\s*504/i.test(text)) {
+      return '外网网关暂时不可用（' + status + '）。请稍后重试';
+    }
+    if (status === 413) {
+      return '单文件过大，请压缩后重试';
+    }
+    if (!status) {
+      return '服务器无响应，请确认服务已启动后刷新重试';
+    }
+    return '服务器返回异常（HTTP ' + status + '），请刷新后重试';
+  }
+
+  function isLocalHost() {
+    const host = (location.hostname || '').toLowerCase();
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  }
+
+  /** 外网串行更稳；本机可 2 路并行 */
+  function uploadConcurrency(fileCount) {
+    if (!isLocalHost()) return 1;
+    return Math.min(2, Math.max(1, fileCount));
+  }
+
+  function chunkThresholdBytes() {
+    // 外网：超过 512KB 就分块，避免 Cloudflare 524
+    return isLocalHost() ? 4 * 1024 * 1024 : 512 * 1024;
+  }
+
+  function chunkSizeBytes() {
+    return isLocalHost() ? 2 * 1024 * 1024 : 512 * 1024;
+  }
+
+  async function mapPool(items, limit, worker) {
+    let cursor = 0;
+    const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (cursor < items.length) {
+        const idx = cursor++;
+        await worker(items[idx], idx);
+      }
+    });
+    await Promise.all(runners);
+  }
+
+  async function xhrPostWithRetry(url, form, onProgress, retries) {
+    const maxTry = Math.max(1, retries || 3);
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxTry; attempt++) {
+      try {
+        return await xhrPost(url, form, onProgress);
+      } catch (e) {
+        lastErr = e;
+        const msg = String((e && e.message) || e || '');
+        const retriable = /524|502|504|超时|网络错误|无响应|返回异常/.test(msg);
+        if (!retriable || attempt >= maxTry) break;
+        await new Promise((r) => setTimeout(r, 700 * attempt));
+      }
+    }
+    throw lastErr || new Error('上传失败');
+  }
+
+  /** 大文件按块上传并在服务端组装 */
+  async function uploadFileInChunks(taskId, item, onFrac) {
+    const size = item.file.size;
+    const chunkSize = chunkSizeBytes();
+    const total = Math.max(1, Math.ceil(size / chunkSize));
+    for (let i = 0; i < total; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(size, start + chunkSize);
+      const blob = item.file.slice(start, end);
+      const form = new FormData();
+      form.append('filename', item.name);
+      form.append('chunk_index', String(i));
+      form.append('chunk_total', String(total));
+      form.append('chunk', blob, 'chunk.bin');
+      await xhrPostWithRetry(apiBase() + '/upload-chunk/' + taskId, form, (loaded, reqTotal) => {
+        const within = reqTotal > 0 ? loaded / reqTotal : 1;
+        const frac = Math.min(1, (i + within) / total);
+        onFrac(frac);
+      }, 4);
+      onFrac(Math.min(1, (i + 1) / total));
+    }
+  }
+
+  /** 单文件上传：小文件整传，大文件分块；失败自动重试 */
+  async function uploadOnePart(taskId, item, idx, onFrac) {
+    if (item.file.size > chunkThresholdBytes()) {
+      await uploadFileInChunks(taskId, item, onFrac);
+      onFrac(1);
+      return;
+    }
+    const form = new FormData();
+    form.append('files', item.file, item.name);
+    await xhrPostWithRetry(apiBase() + '/upload-part/' + taskId, form, (loaded, total) => {
+      const frac = total > 0 ? Math.min(1, loaded / total) : 0;
+      onFrac(frac);
+    }, 3);
+    onFrac(1);
   }
 
   async function startUpload() {
     if (!pendingFiles) return;
+    stopPolling();
     const btn = document.getElementById('startBtn');
-    btn.disabled = true; btn.textContent = '⏳ 上传中...';
+    btn.disabled = true; btn.textContent = '⏳ 准备中...';
 
-    const form = new FormData();
-    for (const f of pendingFiles) form.append('files', f);
-
-    const endpoint = uploadMode === 'folder' ? '/api/upload-folder' : '/api/upload-files';
+    document.getElementById('resultSection').classList.remove('active');
+    document.getElementById('selectedInfo').style.display = 'none';
+    document.getElementById('errorBox').innerHTML = '';
+    document.getElementById('progressBar').style.width = '0%';
+    setProgress(0, '正在准备文件...');
+    await new Promise((r) => setTimeout(r, 30));
 
     try {
-      const resp = await fetch(endpoint, { method: 'POST', body: form });
-      const data = await resp.json();
-      if (!data.ok) { showError(data.error); btn.disabled = false; btn.textContent = '🚀 开始识别'; return; }
+      const total = pendingFiles.length;
+      const prepared = [];
+      let originalBytes = 0;
+      let compressedBytes = 0;
+      for (let i = 0; i < total; i++) {
+        const f = pendingFiles[i];
+        originalBytes += f.size;
+        setProgress(Math.round(((i + 0.3) / total) * 12), `压缩/准备中 (${i + 1}/${total}): ${f.name}`);
+        const out = await compressImageIfNeeded(f);
+        compressedBytes += out.size;
+        let name = (uploadMode === 'folder' && f.webkitRelativePath) ? f.webkitRelativePath : out.name;
+        if (out !== f && out.name.toLowerCase().endsWith('.jpg')) {
+          name = name.replace(/\.[^.]+$/, '.jpg');
+        }
+        prepared.push({ file: out, name });
+      }
 
-      taskId = data.task_id;
-      document.getElementById('progressSection').classList.add('active');
-      document.getElementById('resultSection').classList.remove('active');
-      document.getElementById('selectedInfo').style.display = 'none';
-      document.getElementById('errorBox').innerHTML = '';
+      const saved = originalBytes > compressedBytes ? originalBytes - compressedBytes : 0;
+      const initResp = await apiFetch(apiBase() + '/upload-init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: uploadMode === 'folder' ? 'folder' : 'files',
+          ocr_mode: ocrMode || 'balanced',
+        }),
+      });
+      if (initResp.status === 401) {
+        try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch (e) {}
+        refreshAuthGate();
+        throw new Error('访问口令错误或已失效');
+      }
+      const initRaw = await initResp.text();
+      let initData = null;
+      try {
+        initData = JSON.parse(initRaw || '{}');
+      } catch (err) {
+        throw new Error(explainGatewayError(initResp.status, initRaw));
+      }
+      if (!initData.ok) throw new Error(initData.error || '创建上传任务失败');
 
+      taskId = initData.task_id;
+      btn.textContent = '⏳ 上传中...';
+
+      const fileSizes = prepared.map((x) => x.file.size);
+      const totalBytes = fileSizes.reduce((s, n) => s + n, 0) || 1;
+      const fileFrac = new Array(prepared.length).fill(0);
+      let finishedCount = 0;
+      const concurrency = uploadConcurrency(prepared.length);
+
+      const paintUpload = (currentName) => {
+        let uploaded = 0;
+        for (let i = 0; i < fileFrac.length; i++) {
+          uploaded += fileSizes[i] * fileFrac[i];
+        }
+        const ratio = Math.min(1, uploaded / totalBytes);
+        const pct = 12 + Math.round(ratio * 78);
+        const nameTip = currentName ? `：${currentName}` : '';
+        setProgress(
+          pct,
+          `上传中 ${finishedCount}/${prepared.length}${nameTip}（${formatBytes(uploaded)} / ${formatBytes(totalBytes)}）`
+        );
+      };
+
+      const tip = saved > 100 * 1024
+        ? `已压缩节省 ${formatBytes(saved)}，开始上传...`
+        : (concurrency > 1 ? `开始上传（${concurrency} 路）...` : '开始逐个上传...');
+      setProgress(12, tip);
+
+      await mapPool(prepared, concurrency, async (item, idx) => {
+        const short = (item.name || '').split(/[/\\]/).pop() || item.name;
+        await uploadOnePart(taskId, item, idx, (frac) => {
+          fileFrac[idx] = Math.max(0, Math.min(1, frac));
+          paintUpload(short);
+        });
+        finishedCount += 1;
+        fileFrac[idx] = 1;
+        paintUpload(short);
+      });
+
+      setProgress(92, '上传完成，正在启动识别...');
+      btn.textContent = '⏳ 处理中...';
+      const commitResp = await apiFetch(apiBase() + '/upload-commit/' + taskId, { method: 'POST' });
+      if (commitResp.status === 401) {
+        try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch (e) {}
+        refreshAuthGate();
+        throw new Error('访问口令错误或已失效');
+      }
+      const commitRaw = await commitResp.text();
+      let data = null;
+      try {
+        data = JSON.parse(commitRaw || '{}');
+      } catch (err) {
+        throw new Error(explainGatewayError(commitResp.status, commitRaw));
+      }
+      if (!data || !data.ok) {
+        showError((data && data.error) || '启动识别失败');
+        resetStartButton();
+        document.getElementById('selectedInfo').style.display = '';
+        document.getElementById('progressSection').classList.remove('active');
+        return;
+      }
+
+      btn.textContent = '⏳ 识别中...';
+      setProgress(93, '上传完成，正在开始识别...');
+      const epoch = ++pollEpoch;
+      const watchingId = taskId;
       if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(poll, 500);
-      poll();
+      pollTimer = setInterval(() => poll(epoch, watchingId), 400);
+      poll(epoch, watchingId);
     } catch (e) {
       showError('上传失败: ' + e.message);
-      btn.disabled = false; btn.textContent = '🚀 开始识别';
+      resetStartButton();
+      document.getElementById('selectedInfo').style.display = '';
+      document.getElementById('progressSection').classList.remove('active');
     }
   }
 
-  async function poll() {
-    if (!taskId) return;
+  async function poll(epoch, watchingId) {
+    if (epoch !== pollEpoch || !watchingId || taskId !== watchingId) return;
     try {
-      const resp = await fetch('/api/status/' + taskId);
+      const resp = await apiFetch('/api/status/' + watchingId);
       const d = await resp.json();
-      document.getElementById('progressBar').style.width = (d.progress||0) + '%';
-      document.getElementById('progressMsg').textContent = d.message || '处理中...';
+      // 过期轮询直接丢弃，避免第一次完成后的响应关掉第二次的进度条
+      if (epoch !== pollEpoch || taskId !== watchingId) return;
+
+      const serverPct = d.progress || 0;
+      const pct = d.status === 'done' ? 100 : (93 + Math.round(serverPct * 0.07));
+      setProgress(pct, d.message || '处理中...');
 
       if (d.status === 'done') {
-        clearInterval(pollTimer);
+        stopPolling();
         document.getElementById('progressSection').classList.remove('active');
         showResults(d);
         resetSelection();
       } else if (d.status === 'error') {
-        clearInterval(pollTimer);
+        stopPolling();
         document.getElementById('progressSection').classList.remove('active');
         showError(d.error);
         document.getElementById('selectedInfo').style.display = '';
-        document.getElementById('startBtn').disabled = false;
-        document.getElementById('startBtn').textContent = '🚀 开始识别';
+        resetStartButton();
       }
-    } catch (e) { clearInterval(pollTimer); }
+    } catch (e) { /* 短暂网络抖动时继续轮询 */ }
   }
 
   function showResults(d) {
     document.getElementById('resultSection').classList.add('active');
     document.getElementById('statSuccess').textContent = d.success || 0;
-    document.getElementById('statTotal').textContent = (d.invoices||[]).length;
+    document.getElementById('statTotal').textContent = d.total || (d.invoices || []).length || (d.table_files || []).length;
+    document.getElementById('errorBox').innerHTML = '';
+
+    const isTable = (d.feature === 'table') || featureMode === 'table';
+    const invoiceWrap = document.getElementById('invoiceResultWrap');
+    const tableWrap = document.getElementById('tableResultWrap');
+    const amountWrap = document.getElementById('statAmountWrap');
+    const link = document.getElementById('downloadLink');
+
+    if (isTable) {
+      amountWrap.style.display = 'none';
+      invoiceWrap.style.display = 'none';
+      tableWrap.style.display = '';
+      const list = document.getElementById('tableFileList');
+      const files = d.table_files || [];
+      list.innerHTML = files.map((f) => {
+        if (f.ok && f.excel) {
+          return `<li>✅ ${escapeHtml(f.source)} → <a href="${withToken('/api/table/download/' + taskId + '/' + encodeURIComponent(f.excel))}">${escapeHtml(f.excel)}</a>（${f.rows || 0} 行）</li>`;
+        }
+        return `<li>❌ ${escapeHtml(f.source || '')}：${escapeHtml(f.error || '失败')}</li>`;
+      }).join('');
+      if (d.output_file) {
+        link.style.display = 'inline-block';
+        link.textContent = '📥 打包下载全部 Excel';
+        link.href = withToken('/api/download/' + taskId);
+      } else {
+        link.style.display = 'none';
+      }
+      return;
+    }
+
+    amountWrap.style.display = '';
+    invoiceWrap.style.display = '';
+    tableWrap.style.display = 'none';
     document.getElementById('statAmount').textContent = '¥' + (d.total||0).toLocaleString('zh-CN', {minimumFractionDigits:2});
+    document.getElementById('statTotal').textContent = (d.invoices||[]).length;
 
     document.getElementById('resultTable').innerHTML = (d.invoices||[]).map(inv => {
       const badge = inv.extraction_method === 'OCR'
@@ -288,9 +858,9 @@
         <td>${badge}</td></tr>`;
     }).join('');
 
-    const link = document.getElementById('downloadLink');
     link.style.display = 'inline-block';
-    link.href = '/api/download/' + taskId;
+    link.textContent = '📥 下载 Excel';
+    link.href = withToken('/api/download/' + taskId);
   }
 
   function showError(msg) {

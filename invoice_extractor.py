@@ -55,10 +55,115 @@ CONFIG = {
 }
 # ============================================================
 
-# PaddleOCR 单例（延迟初始化，避免不必要的加载）
+# 支持的发票文件扩展名
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}
+INVOICE_EXTENSIONS = {'.pdf'} | IMAGE_EXTENSIONS
+
+
+def is_image_file(path: str) -> bool:
+    """判断是否为发票图片文件。"""
+    return os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS
+
+
+def is_supported_invoice_file(path: str) -> bool:
+    """判断是否为支持识别的发票文件（PDF 或图片）。"""
+    return os.path.splitext(path)[1].lower() in INVOICE_EXTENSIONS
+
 _ocr_instance = None
 _ocr_failed = False
+_ocr_instance_mode = None  # 当前实例对应的识别模式
+_ocr_quality_mode = 'balanced'  # fast / balanced / accurate
 _progress_callback = None
+
+OCR_MODE_FAST = 'fast'
+OCR_MODE_BALANCED = 'balanced'
+OCR_MODE_ACCURATE = 'accurate'
+OCR_MODES = (OCR_MODE_FAST, OCR_MODE_BALANCED, OCR_MODE_ACCURATE)
+
+# 模式参数：模型档位、渲染 DPI、最大边、是否字段不全时重试
+_OCR_MODE_PROFILES = {
+    OCR_MODE_FAST: {
+        'label': '速度',
+        'use_server_model': False,
+        'dpi_cpu': 140,
+        'dpi_gpu': 180,
+        'max_side_cpu': 1800,
+        'max_side_gpu': 2400,
+        'retry_incomplete': False,
+    },
+    OCR_MODE_BALANCED: {
+        'label': '平衡',
+        'use_server_model': False,
+        'dpi_cpu': 160,
+        'dpi_gpu': 220,
+        'max_side_cpu': 2200,
+        'max_side_gpu': 3200,
+        'retry_incomplete': True,
+    },
+    OCR_MODE_ACCURATE: {
+        'label': '精度',
+        'use_server_model': True,
+        'dpi_cpu': 180,
+        'dpi_gpu': 260,
+        'max_side_cpu': 2400,
+        'max_side_gpu': 3900,
+        'retry_incomplete': True,
+        'retry_dpi_gpu': 320,
+    },
+}
+
+
+def normalize_ocr_mode(mode) -> str:
+    """规范化识别模式，非法值回退为平衡。"""
+    m = (mode or '').strip().lower()
+    aliases = {
+        'speed': OCR_MODE_FAST,
+        '快速': OCR_MODE_FAST,
+        '速度': OCR_MODE_FAST,
+        'balance': OCR_MODE_BALANCED,
+        'balanced': OCR_MODE_BALANCED,
+        '平衡': OCR_MODE_BALANCED,
+        'accurate': OCR_MODE_ACCURATE,
+        'accuracy': OCR_MODE_ACCURATE,
+        'precision': OCR_MODE_ACCURATE,
+        '精度': OCR_MODE_ACCURATE,
+        '精准': OCR_MODE_ACCURATE,
+    }
+    if m in OCR_MODES:
+        return m
+    return aliases.get(m, OCR_MODE_BALANCED)
+
+
+def get_ocr_mode() -> str:
+    return _ocr_quality_mode
+
+
+def set_ocr_mode(mode: str) -> str:
+    """设置识别模式；若模型档位变化则重建 OCR 实例。"""
+    global _ocr_quality_mode, _ocr_instance, _ocr_instance_mode, _ocr_failed
+    new_mode = normalize_ocr_mode(mode)
+    old_mode = _ocr_quality_mode
+    _ocr_quality_mode = new_mode
+    old_prof = _OCR_MODE_PROFILES.get(old_mode, _OCR_MODE_PROFILES[OCR_MODE_BALANCED])
+    new_prof = _OCR_MODE_PROFILES[new_mode]
+    # server/mobile 切换时必须换实例
+    if (
+        _ocr_instance is not None
+        and bool(old_prof.get('use_server_model')) != bool(new_prof.get('use_server_model'))
+    ):
+        _ocr_instance = None
+        _ocr_instance_mode = None
+        _ocr_failed = False
+        sys.stderr.write(f"  [模式] 切换 {old_mode} → {new_mode}，将重新加载 OCR 模型\n")
+        sys.stderr.flush()
+    else:
+        sys.stderr.write(f"  [模式] 识别模式: {new_prof['label']} ({new_mode})\n")
+        sys.stderr.flush()
+    return new_mode
+
+
+def _current_ocr_profile() -> dict:
+    return _OCR_MODE_PROFILES.get(_ocr_quality_mode, _OCR_MODE_PROFILES[OCR_MODE_BALANCED])
 
 
 def set_progress_callback(callback):
@@ -80,9 +185,10 @@ def _emit_progress(message: str, page_progress=None):
 
 def reset_ocr_if_failed():
     """OCR 曾失败后，允许新批次重新尝试加载（如用户已清理缓存）。"""
-    global _ocr_instance, _ocr_failed
+    global _ocr_instance, _ocr_failed, _ocr_instance_mode
     if _ocr_failed:
         _ocr_instance = None
+        _ocr_instance_mode = None
         _ocr_failed = False
 
 
@@ -116,8 +222,40 @@ def _buyer_name_base(name):
     return re.sub(r'[（(].*[）)]', '', name or '').strip()
 
 
+def _ensure_torch_before_paddle():
+    """PaddleOCR 3.x → PaddleX → modelscope 会间接 import torch。
+    若先加载 paddle 再加载 torch，Windows 上常见 shm.dll WinError 127。
+    必须在任何 paddle 导入之前先加载 torch。"""
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        # torch 缺失时仍尝试继续；真正失败会在 paddleocr 导入阶段暴露
+        pass
+
+
+def _nvidia_gpu_visible() -> bool:
+    """用 nvidia-smi 判断本机是否有可用 NVIDIA GPU（不依赖 paddle 是否为 GPU 版）。"""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ['nvidia-smi', '-L'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            timeout=5,
+        )
+        return r.returncode == 0 and 'GPU' in (r.stdout or '')
+    except Exception:
+        return False
+
+
 def _detect_paddle_device():
-    """自动选择 CPU/GPU，避免无 GPU 电脑误装 GPU 版 Paddle 后无法运行。"""
+    """优先 GPU；可用环境变量 INVOICE_TOOL_DEVICE=gpu:0 / cpu 强制指定。"""
+    forced = (os.environ.get('INVOICE_TOOL_DEVICE') or '').strip().lower()
+    if forced in ('cpu', 'gpu', 'gpu:0') or forced.startswith('gpu:'):
+        if forced == 'gpu':
+            return 'gpu:0'
+        return forced
+
+    _ensure_torch_before_paddle()
     try:
         import paddle
         if paddle.device.is_compiled_with_cuda():
@@ -126,8 +264,19 @@ def _detect_paddle_device():
                     return 'gpu:0'
             except Exception:
                 pass
+        # 已编译 CUDA 但 device_count 异常时，若本机有独显仍尝试 GPU
+        if paddle.device.is_compiled_with_cuda() and _nvidia_gpu_visible():
+            return 'gpu:0'
     except Exception:
         pass
+
+    # 有 NVIDIA 显卡但装了 CPU 版 paddle 时给出明确提示
+    if _nvidia_gpu_visible():
+        sys.stderr.write(
+            "  [检测] 发现 NVIDIA GPU，但当前 Paddle 为 CPU 版，将使用 CPU。\n"
+            "  [提示] 请安装 GPU 版: 见 requirements-gpu.txt 或 README\n"
+        )
+        sys.stderr.flush()
     return 'cpu'
 
 
@@ -203,39 +352,79 @@ def _run_ocr_on_image(ocr, image_path: str) -> str:
     return ''
 
 
-def _render_page_pixmap(page, target_max_side: int = None):
-    """渲染 PDF 页面，控制最大边长，避免 OCR 引擎强制缩图导致识别率下降。"""
+def _render_page_pixmap(page, target_max_side: int = None, dpi: int = None):
+    """按当前识别模式渲染 PDF 页面（不超过 PaddleOCR max_side_limit≈4000）。"""
+    device = _detect_paddle_device()
+    prof = _current_ocr_profile()
+    is_cpu = (device == 'cpu')
+    if dpi is None:
+        dpi = prof['dpi_cpu'] if is_cpu else prof['dpi_gpu']
     if target_max_side is None:
-        # CPU 电脑适当降低分辨率，加快识别
-        target_max_side = 2400 if _detect_paddle_device() == 'cpu' else 3600
+        target_max_side = prof['max_side_cpu'] if is_cpu else prof['max_side_gpu']
     rect = page.rect
-    dpi = 200
     if rect.width > 0 and rect.height > 0:
         max_side = max(rect.width, rect.height) / 72.0 * dpi
         if max_side > target_max_side:
-            dpi = max(120, int(dpi * target_max_side / max_side))
-    return page.get_pixmap(dpi=dpi)
+            dpi = max(120 if is_cpu else 160, int(dpi * target_max_side / max_side))
+    return page.get_pixmap(dpi=dpi, alpha=False)
 
 
 def _ocr_page_text(ocr, fitz_page, page_label: str = '') -> str:
-    """对 PDF 单页执行 OCR，返回文本。"""
+    """对 PDF 单页执行 OCR；精度/平衡模式下字段不全时可提高清晰度重试。"""
     hint = f' ({page_label})' if page_label else ''
-    _emit_progress(f"  [OCR] 本页图像识别中{hint}，CPU 电脑约需 20～40 秒，请稍候...")
+    prof = _current_ocr_profile()
+    _emit_progress(f"  [OCR] 本页图像识别中{hint}（{prof['label']}模式）...")
     pix = _render_page_pixmap(fitz_page)
     tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
     tmp.close()
     try:
         pix.save(tmp.name)
-        return _run_ocr_on_image(ocr, tmp.name)
+        text = _run_ocr_on_image(ocr, tmp.name)
     finally:
         try:
             os.unlink(tmp.name)
         except OSError:
             pass
 
+    allow_retry = bool(prof.get('retry_incomplete'))
+    if allow_retry and text and _classify_page(text, source='ocr') == 'invoice':
+        probe = InvoiceInfo()
+        _extract_fields(text, probe)
+        need_retry = (
+            not probe.invoice_number
+            or not probe.total_with_tax
+            or (not probe.buyer_name and not probe.seller_name)
+        )
+        if need_retry and _detect_paddle_device().startswith('gpu'):
+            retry_dpi = int(prof.get('retry_dpi_gpu') or min(320, prof['dpi_gpu'] + 60))
+            retry_side = min(3900, int(prof['max_side_gpu']))
+            _emit_progress(f"  [OCR] 字段不完整，提高清晰度重试{hint}...")
+            pix2 = _render_page_pixmap(fitz_page, target_max_side=retry_side, dpi=retry_dpi)
+            tmp2 = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            tmp2.close()
+            try:
+                pix2.save(tmp2.name)
+                text2 = _run_ocr_on_image(ocr, tmp2.name)
+                if text2 and len(text2) >= len(text) * 0.8:
+                    probe2 = InvoiceInfo()
+                    _extract_fields(text2, probe2)
+                    score = lambda p: sum(bool(x) for x in (
+                        p.invoice_number, p.invoice_date, p.buyer_name,
+                        p.seller_name, p.total_with_tax,
+                    ))
+                    if score(probe2) >= score(probe):
+                        text = text2
+            finally:
+                try:
+                    os.unlink(tmp2.name)
+                except OSError:
+                    pass
+    return text or ''
+
 
 def _extract_receipt_number(text: str) -> str:
-    """提取财政/医疗电子票据号码（票据号码），兼容 OCR 误识别。"""
+    """提取财政/医疗电子票据号码（票据号码），兼容 OCR 误识别。
+    注意：不得误匹配增值税发票的「发票号码」。"""
     norm = _normalize_match_text(text)
     compact = re.sub(r'\s+', '', norm)
 
@@ -244,8 +433,9 @@ def _extract_receipt_number(text: str) -> str:
         r'票据号[码马][：:.]\s*(\d{6,30})',
         r'柔据号[码马][：:.]\s*(\d{6,30})',
         r'票[据櫃][号码码]+[：:.]\s*(\d{6,30})',
-        r'(?<![代码代马])号码[：:.](\d{6,30})',
-        r'(?<![代码代马])号码(\d{8,12})',
+        # 避免匹配「发票号码」：号码前一字不能是「票」
+        r'(?<![发票票代代码马])号码[：:.](\d{6,30})',
+        r'(?<![发票票代代码马])号码(\d{8,12})',
     ]
     for pattern in patterns:
         m = re.search(pattern, compact)
@@ -270,19 +460,43 @@ def _normalize_ocr_text(text: str) -> str:
     fixes = [
         ('开东日期', '开票日期'),
         ('开票月期', '开票日期'),
+        ('开累日期', '开票日期'),
+        ('开乘日期', '开票日期'),
+        ('开系日期', '开票日期'),
+        ('开票日斯', '开票日期'),
         ('收款单住', '收款单位'),
         ('收杖单位', '收款单位'),
         ('收狄单位', '收款单位'),
         ('收欣单位', '收款单位'),
+        ('收状单位', '收款单位'),
         ('文款人、', '文款人：'),
         ('文款人,', '文款人：'),
         ('文秋人、', '文秋人：'),
         ('交款人—', '交款人：'),
         ('交款人-', '交款人：'),
         ('此诊日期', '就诊日期'),
+        ('柔据号码', '票据号码'),
+        ('条据号码', '票据号码'),
+        ('集据号码', '票据号码'),
+        ('票根号码', '票据号码'),
+        ('金须合计', '金额合计'),
+        ('金合计', '金额合计'),
+        ('金颠合计', '金额合计'),
+        ('个人见金支付', '个人现金支付'),
+        ('个人见盒支付', '个人现金支付'),
+        ('个人现金支什', '个人现金支付'),
+        ('价税台计', '价税合计'),
+        ('价税合汁', '价税合计'),
     ]
     for old, new in fixes:
         text = text.replace(old, new)
+    # 仅修正「交款人／收款人」后的全角点号，避免误伤姓名中的间隔号
+    text = re.sub(
+        r'([交文又][款此秋北止使武达]?人|[收收款]款?单位)\s*[．·、]\s*',
+        r'\1：',
+        text,
+    )
+    text = re.sub(r'([人位码期])\s*[：:]\s*', r'\1：', text)
     return text
 
 
@@ -290,7 +504,7 @@ def _looks_like_person_name(name: str) -> bool:
     """判断字符串是否像中文人名。"""
     if not name or len(name) < 2 or len(name) > 8:
         return False
-    if re.search(r'社会信用|校验|票据|代码|开票|统一|项目|卫生院|医院|公司|门诊|体检', name):
+    if re.search(r'社会|信用|校验|票据|代码|开票|统一|项目|卫生院|医院|公司|门诊|体检|集团|有限', name):
         return False
     if re.fullmatch(r'[\d*~.]+', name):
         return False
@@ -318,19 +532,27 @@ def _extract_invoice_date(text: str) -> str:
     """提取开票日期，兼容 OCR 误识别及就诊日期回退。"""
     norm = _normalize_match_text(_normalize_ocr_text(text))
 
-    m = re.search(r'开[票东]日期[：:.]?\s*(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})', norm)
+    m = re.search(r'开[票东累乘系]日期[：:.]?\s*(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})', norm)
     if m:
         return f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
 
-    m = re.search(r'开[票东]日期[：:.]?\s*(\d{7,8})', norm)
+    m = re.search(r'开[票东累乘系]日期[：:.]?\s*(\d{7,8})', norm)
     if m:
         parsed = _parse_compact_date(m.group(1))
         if parsed:
             return parsed
 
-    m = re.search(r'开[票东]日期[：:.]?\s*\n\s*(\d{8})', norm)
+    m = re.search(r'开[票东累乘系]日期[：:.]?\s*\n\s*(\d{8})', norm)
     if m:
         parsed = _parse_compact_date(m.group(1))
+        if parsed:
+            return parsed
+
+    # OCR 把「开票日期：20260124」识别成中间夹杂空格/符号
+    m = re.search(r'开[票东累乘系]日期[：:.]?\s*([0-9OIlB\s]{7,12})', norm)
+    if m:
+        digits = re.sub(r'[^0-9]', '', m.group(1).translate(str.maketrans('OIlB', '0118')))
+        parsed = _parse_compact_date(digits)
         if parsed:
             return parsed
 
@@ -350,25 +572,28 @@ def _extract_payer_name(text: str) -> str:
     """提取财政票据交款人，兼容 OCR 误识别及姓名换行。"""
     norm = _normalize_match_text(_normalize_ocr_text(text))
     cn_name = r'[\u4e00-\u9fff·]{2,8}'
+    punct = r'[：:.\s．·、]*'
 
     inline_patterns = [
-        rf'[交文又][款此秋北止使武达]人[：:.、]\s*({cn_name})',
-        rf'文人[：:.]\s*({cn_name})',
-        rf'又北人[：:.]\s*({cn_name})',
-        rf'交[北武]人[：:.]\s*({cn_name})',
-        rf'交款人[：:.]\s*({cn_name})',
-        rf'[交文又][款此秋北止使武达][人]([\u4e00-\u9fff·]{{2,4}})',
-        rf'文达人([\u4e00-\u9fff·]{{2,4}})',
+        rf'[交文又][款此秋北止使武达]人{punct}({cn_name})',
+        rf'文人{punct}({cn_name})',
+        rf'又北人{punct}({cn_name})',
+        rf'交[北武]人{punct}({cn_name})',
+        rf'交款人{punct}({cn_name})',
+        rf'文此人{punct}({cn_name})',
+        rf'交此人{punct}({cn_name})',
+        rf'[交文又][款此秋北止使武达]人({cn_name})',
+        rf'文达人({cn_name})',
     ]
     for pattern in inline_patterns:
         for m in re.finditer(pattern, norm):
-            name = _clean_name(m.group(1).split('统一')[0].split('校验')[0])
+            name = _clean_name(m.group(1).split('统一')[0].split('校验')[0].split('开票')[0])
             if _looks_like_person_name(name):
                 return name
 
     multiline_patterns = [
         rf'久止人\s*\n\s*({cn_name})',
-        rf'(?:[交文又][款此秋北止使武达]人|文人)\s*\n\s*({cn_name})',
+        rf'(?:[交文又][款此秋北止使武达]人|文人|文此人)\s*\n\s*({cn_name})',
     ]
     for pattern in multiline_patterns:
         m = re.search(pattern, norm)
@@ -376,6 +601,11 @@ def _extract_payer_name(text: str) -> str:
             name = _clean_name(m.group(1))
             if _looks_like_person_name(name):
                 return name
+
+    # 性别行前常见姓名残留（如「张三\n性别:男」）
+    m = re.search(rf'({cn_name})\s*\n\s*性别', norm)
+    if m and _looks_like_person_name(m.group(1)):
+        return m.group(1)
     return ''
 
 
@@ -383,18 +613,27 @@ def _extract_receipt_seller(text: str) -> str:
     """提取财政票据收款单位，兼容 OCR 误识别。"""
     norm = _normalize_ocr_text(text)
     patterns = [
-        r'收款单位[：:]\s*(.+?)(?:\n|复核人|核人|$)',
-        r'收[款杖狄]?单?[位住][：:]\s*(.+?)(?:\n|复核人|核人|$)',
+        r'收款单位[：:]\s*(.+?)(?:\n|复核人|核人|开票人|$)',
+        r'收[款杖狄状]?单?[位住][：:]\s*(.+?)(?:\n|复核人|核人|$)',
         r'收款单位\s*\n\s*([^\n]+)',
+        r'收[款状]?单位\s*\n\s*([^\n]+)',
+        r'收款单位\s*([^\n]{4,30})',
     ]
     for pattern in patterns:
         m = re.search(pattern, norm, re.DOTALL)
         if m:
             name = _clean_name(m.group(1).split('\n')[0])
-            if name and re.search(r'卫生院|医院|中心|诊所', name):
+            if name and (
+                re.search(r'卫生院|医院|中心|诊所|门诊部|卫生室', name)
+                or (len(name) >= 4 and not re.search(r'校验|票据|代码|支付|合计', name))
+            ):
                 return name
 
-    m = re.search(r'备注[：:][^\n]*?([\u4e00-\u9fff]{2,24}(?:卫生院|医院|中心))', norm)
+    m = re.search(r'备注[：:][^\n]*?([\u4e00-\u9fff]{2,24}(?:卫生院|医院|中心|诊所))', norm)
+    if m:
+        return _clean_name(m.group(1))
+    # 页脚机构名兜底
+    m = re.search(r'([\u4e00-\u9fff]{2,16}(?:县|市|区)[\u4e00-\u9fff]{0,12}(?:卫生院|医院|中心))', norm)
     if m:
         return _clean_name(m.group(1))
     return ''
@@ -437,7 +676,7 @@ def _extract_invoice_number(text: str) -> str:
 
 def _get_ocr():
     """获取 PaddleOCR 实例（单例），自动处理中文路径、缓存损坏等问题"""
-    global _ocr_instance, _ocr_failed
+    global _ocr_instance, _ocr_failed, _ocr_instance_mode
 
     if _ocr_instance is not None:
         return _ocr_instance
@@ -474,8 +713,11 @@ def _get_ocr():
     # ── 跳过连通性检查 ──
     os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
 
+    # 必须在 detect/import paddle 之前预加载 torch，避免 Windows DLL 冲突
+    _ensure_torch_before_paddle()
     device = _detect_paddle_device()
-    sys.stderr.write(f"  [检测] Paddle 运行设备: {device}\n")
+    prof = _current_ocr_profile()
+    sys.stderr.write(f"  [检测] Paddle 运行设备: {device}，识别模式: {prof['label']}\n")
     sys.stderr.flush()
 
     ocr_kwargs = dict(
@@ -486,9 +728,15 @@ def _get_ocr():
     )
 
     def _ocr_init_kwargs(dev):
-        """CPU 使用 mobile 模型（比 medium 快 2～3 倍，发票识别足够）。"""
+        """按模式选择 mobile / server 模型。"""
         kw = dict(ocr_kwargs)
-        if dev == 'cpu':
+        want_server = bool(prof.get('use_server_model')) and str(dev).startswith('gpu')
+        if want_server:
+            kw.update(
+                text_detection_model_name='PP-OCRv4_server_det',
+                text_recognition_model_name='PP-OCRv4_server_rec',
+            )
+        else:
             kw.update(
                 text_detection_model_name='PP-OCRv4_mobile_det',
                 text_recognition_model_name='PP-OCRv4_mobile_rec',
@@ -509,21 +757,43 @@ def _get_ocr():
             try:
                 sys.stderr.write(
                     f"  [初始化] 正在加载 PaddleOCR 模型 "
-                    f"(尝试 {attempt+1}/{max_retries}, 设备 {dev})...\n"
+                    f"(尝试 {attempt+1}/{max_retries}, 设备 {dev}, 模式 {prof['label']})...\n"
                 )
                 sys.stderr.flush()
+                _ensure_torch_before_paddle()
                 from paddleocr import PaddleOCR
                 init_kw = _ocr_init_kwargs(dev)
                 try:
                     _ocr_instance = PaddleOCR(device=dev, **init_kw)
                 except TypeError:
                     _ocr_instance = PaddleOCR(**init_kw)
+                except Exception as model_err:
+                    # GPU server 模型不可用时回退 mobile，避免整段放弃
+                    if str(dev).startswith('gpu') and 'server_' in str(init_kw):
+                        sys.stderr.write(
+                            f"  [提示] server 模型加载失败，回退 mobile: {str(model_err)[:120]}\n"
+                        )
+                        sys.stderr.flush()
+                        init_kw = dict(ocr_kwargs)
+                        init_kw.update(
+                            text_detection_model_name='PP-OCRv4_mobile_det',
+                            text_recognition_model_name='PP-OCRv4_mobile_rec',
+                        )
+                        try:
+                            _ocr_instance = PaddleOCR(device=dev, **init_kw)
+                        except TypeError:
+                            _ocr_instance = PaddleOCR(**init_kw)
+                    else:
+                        raise
+                _ocr_instance_mode = _ocr_quality_mode
                 sys.stderr.write(f"  [初始化] PaddleOCR 模型加载完成 (设备 {dev})\n")
                 sys.stderr.flush()
-                _emit_progress(
-                    "  [提示] OCR 引擎就绪，即将逐页识别。"
-                    "CPU 电脑每页约 30～60 秒，请勿关闭窗口。"
+                tip = (
+                    f"  [提示] OCR 引擎就绪（{prof['label']}模式"
+                    + (" / GPU" if str(dev).startswith('gpu') else " / CPU")
+                    + "），即将逐页识别。"
                 )
+                _emit_progress(tip)
                 if has_unicode_path:
                     os.path.expanduser = _original_expanduser
                 return _ocr_instance
@@ -590,6 +860,106 @@ class InvoiceInfo:
         self.phone_number = ""
         self.billing_period = ""
         self.extraction_method = ""
+        self.invoice_type = ""        # 自动识别：vat / rail / fiscal / unknown
+
+
+# 发票类型常量（自动识别，无需用户选择）
+INVOICE_TYPE_VAT = 'vat'          # 增值税电子发票（普通/专用等）
+INVOICE_TYPE_RAIL = 'rail'        # 铁路电子客票
+INVOICE_TYPE_FISCAL = 'fiscal'    # 财政/医疗电子票据
+INVOICE_TYPE_UNKNOWN = 'unknown'
+
+
+def detect_invoice_type(text: str) -> str:
+    """根据页面文本自动判断发票类型，供后续分流提取。"""
+    if not text:
+        return INVOICE_TYPE_UNKNOWN
+    compact = re.sub(r'\s+', '', _normalize_match_text(_normalize_ocr_text(text)))
+
+    # 1) 铁路电子客票
+    rail_hits = sum([
+        bool(re.search(r'铁路电子客票', compact)),
+        bool(re.search(r'电子客票号', compact)),
+        bool(re.search(r'票价[：:].*[¥￥]|票价[¥￥]', compact)),
+        bool(re.search(r'12306|中国铁路|国家铁路', compact)),
+        bool(re.search(r'席别|车次|始发|到达站|出发站', compact)),
+    ])
+    if rail_hits >= 2 or (re.search(r'铁路电子客票|电子客票号', compact) and re.search(r'发票号码|电子发票', compact)):
+        return INVOICE_TYPE_RAIL
+
+    # 2) 增值税电子发票（优先于财政票，避免「小写/号码」误判）
+    vat_hits = sum([
+        bool(re.search(r'价税合计', compact)),
+        bool(re.search(r'购买方信息|销售方信息', compact)),
+        bool(re.search(r'增值税|普通发票|专用发票', compact)),
+        bool(re.search(r'纳税人识别号', compact)),
+        bool(re.search(r'发票号码', compact) and re.search(r'电子发票', compact)),
+    ])
+    if vat_hits >= 2:
+        return INVOICE_TYPE_VAT
+    if re.search(r'价税合计', compact) and re.search(r'购买方|销售方|发票号码', compact):
+        return INVOICE_TYPE_VAT
+
+    # 3) 财政/医疗电子票据
+    if re.search(r'票据号码|柔据号码|财政电子票据|医疗.*收费票据|门诊收费票据|浙江省医疗|卫生院', compact):
+        if re.search(r'交款人|收款单位|金额合计|交此人|文款人|文此人|小写', compact) or _extract_receipt_number(text):
+            return INVOICE_TYPE_FISCAL
+    if _is_fiscal_receipt_page(text):
+        return INVOICE_TYPE_FISCAL
+
+    if re.search(r'电子发票|增值税电子', compact):
+        return INVOICE_TYPE_VAT
+
+    return INVOICE_TYPE_UNKNOWN
+
+
+def _clean_amount(raw: str) -> str:
+    """规范化金额字符串，去掉逗号、空格与残缺小数点。"""
+    if not raw:
+        return ''
+    s = str(raw).replace(',', '').replace(' ', '').replace('￥', '').replace('¥', '').strip()
+    m = re.search(r'(\d+\.\d{2})', s)
+    if m:
+        return m.group(1)
+    m = re.search(r'^(\d+)\.(\d)$', s)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}0"
+    m = re.search(r'^(\d+)\.$', s)
+    if m:
+        return ''
+    m = re.search(r'^(\d+)(?:\.(\d+))?$', s)
+    if m:
+        if m.group(2) is None:
+            return m.group(1)
+        return f"{m.group(1)}.{m.group(2)[:2]}"
+    return ''
+
+
+def _extract_amount_from_text(text: str) -> str:
+    """从多种金额写法中提取，兼容 OCR 空格（如 176. 00）。"""
+    patterns = [
+        r'价税合计.*?[（(]小写[）)]\s*[¥￥]?\s*(\d+\s*\.\s*\d{2})',
+        r'[（(]小写[）)]\s*[¥￥]?\s*(\d+\s*\.\s*\d{2})',
+        r'金额合计.*?[（(]小写[）)]\s*[¥￥]?\s*(\d+\s*\.\s*\d{2})',
+        r'个人[见现]?金支付[：:]\s*[¥￥]?\s*(\d+\s*\.\s*\d{2})',
+        r'票价[：:]\s*[¥￥]?\s*(\d+\s*\.\s*\d{2})',
+        r'[（(]小写[）)]\s*[¥￥]?\s*([\d,]+\.?\d*)',
+        r'金额合计.*?[（(]小写[）)]\s*([\d,]+\.?\d*)',
+        r'个人[见现]?金支付[：:]\s*([\d,]+\.?\d*)',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            amt = _clean_amount(m.group(1))
+            if amt and '.' in amt:
+                return amt
+    for pattern in patterns:
+        m = re.search(pattern, text, re.DOTALL)
+        if m:
+            amt = _clean_amount(m.group(1))
+            if amt:
+                return amt
+    return ''
 
 
 def _clean_name(name):
@@ -673,9 +1043,14 @@ def _is_invoice_page(text: str, source: str = 'text') -> bool:
         and bool(re.search(r'销售方', compact))
     )
     has_total = bool(re.search(r'价税合计', compact))
+    has_rail = bool(re.search(r'铁路电子客票|电子客票号|票价', compact))
 
     if not has_invoice_number:
         return False
+
+    # 铁路电子客票：有发票号码 + 铁路特征即可
+    if has_rail and (has_einvoice_title or has_invoice_date or re.search(r'电子客票', compact)):
+        return True
 
     auxiliary_score = sum([has_invoice_date, has_einvoice_title, has_buyer_seller, has_total])
     if auxiliary_score >= 1:
@@ -704,135 +1079,182 @@ def _classify_page(text: str, source: str = 'text') -> str:
     return 'uncertain'
 
 
-def _extract_fields(text: str, info: InvoiceInfo):
-    """从文本中提取发票字段（适用于 pdfplumber 和 OCR 文本）"""
-    text = _normalize_ocr_text(text)
-    norm = _normalize_match_text(text)
-
-    # 1. 发票号码
-    info.invoice_number = _extract_invoice_number(text)
-
-    # 2. 开票日期
-    info.invoice_date = _extract_invoice_date(text)
-
-    # 3. 购买方名称、4. 销售方名称
-    #    先判断文本格式：pdfplumber 排版（购/销交叉）还是 OCR 排版（购买方/销售方分块）
-
+def _extract_buyer_seller_vat(text: str, info: InvoiceInfo):
+    """增值税电子发票：购买方 / 销售方。"""
     company_keywords = ['公司', '移动', '电信', '联通', '集团', '有限', '股份']
 
-    # ---- 判断是否是 pdfplumber 的交叉排版 ----
-    # pdfplumber 特征："购"/"销" 和 "名称：" 在同一行（仅有空格分隔，没有换行）
+    def _is_company(name: str) -> bool:
+        return any(kw in name for kw in company_keywords)
+
+    def _take_name(raw: str) -> str:
+        name = _clean_name((raw or '').split('\n')[0].split('统一')[0])
+        if not name or len(name) <= 1 or name.startswith('统一') or '信用代码' in name:
+            return ''
+        return name
+
+    # 同行双名称：名称：买家 名称：卖家（pdfplumber 常见）
+    m = re.search(
+        r'名称[：:]\s*([^\n]+?)\s+名称[：:]\s*([^\n]+?)(?:\s*统一|\s*$|\n)',
+        text,
+    )
+    if m:
+        n1, n2 = _take_name(m.group(1)), _take_name(m.group(2))
+        if n1 and n2:
+            if _is_company(n1) and not _is_company(n2):
+                info.seller_name, info.buyer_name = n1, n2
+            elif _is_company(n2) and not _is_company(n1):
+                info.buyer_name, info.seller_name = n1, n2
+            else:
+                info.buyer_name, info.seller_name = n1, n2
+
+    if not info.buyer_name:
+        m = re.search(r'购买方名称[：:]\s*([^\n]+)', text)
+        if m:
+            info.buyer_name = _take_name(m.group(1))
+    if not info.seller_name:
+        m = re.search(r'销售方名称[：:]\s*([^\n]+)', text)
+        if m:
+            info.seller_name = _take_name(m.group(1))
+
+    if info.buyer_name and info.seller_name:
+        return
+
     is_pdfplumber_layout = bool(re.search(r'[购销].{0,5}名\s*称[：:]', text))
-    # OCR 特征：有明确的"购买方信息"/"销售方信息"分段标题
     is_ocr_layout = bool(re.search(r'购买方信息|销售方信息', text))
 
     if is_pdfplumber_layout and not is_ocr_layout:
-        # ====== pdfplumber 交叉排版 ======
-        # 文本格式: 购 名称：王俐（个人） 销 名称：中国移动...
-        # 购买方：购...名称：XXX...销（以"销"截断）
-        m = re.search(r'购.*?名称[：:]\s*(.+?)\s+销', text, re.DOTALL)
-        if m:
-            info.buyer_name = _clean_name(m.group(1))
-
-        # 销售方：销...名称：XXX...统一（以"统一"截断）
-        m = re.search(r'销.*?名称[：:]\s*(.+?)(?:\s*统一)', text, re.DOTALL)
-        if m:
-            info.seller_name = _clean_name(m.group(1))
-
-        if not info.seller_name:
-            m = re.search(r'销.*?名称[：:]\s*(.+?)$', text, re.DOTALL)
-            if m:
-                info.seller_name = _clean_name(m.group(1).split('\n')[0])
-
-    else:
-        # ====== OCR 排版 ======
-        # 文本格式: 销售方信息\n购买方信息\n名称：中国移动...\n名称：张娇洋
-        # 用公司关键词区分：包含"公司"→销售方，否则→购买方
-
-        all_name_matches = list(re.finditer(
-            r'名称[：:]\s*(.+?)(?=\s+名称[：:]|$)', text, re.DOTALL
-        ))
-        buyer_candidates = []
-        seller_candidates = []
-
-        for match in all_name_matches:
-            raw = match.group(1).strip().split('\n')[0].strip()
-            name = _clean_name(raw)
-
-            if not name or len(name) <= 1:
-                continue
-            if name.startswith('统一') or '信用代码' in name:
-                continue
-
-            is_company = any(kw in name for kw in company_keywords)
-
-            if is_company:
-                seller_candidates.append(name)
-            else:
-                buyer_candidates.append(name)
-
-        if seller_candidates:
-            info.seller_name = seller_candidates[0]
-        if buyer_candidates:
-            info.buyer_name = buyer_candidates[0]
-
-        # 如果 OCR 分类没找到，回归传统正则
-        if not info.seller_name:
-            m = re.search(r'销.*?名称[：:]\s*(.+?)(?:\s*统一)', text, re.DOTALL)
-            if m:
-                info.seller_name = _clean_name(m.group(1).split('\n')[0])
-        if not info.seller_name:
-            m = re.search(r'销.*?名称[：:]\s*(.+?)$', text, re.DOTALL)
-            if m:
-                info.seller_name = _clean_name(m.group(1).split('\n')[0])
-
         if not info.buyer_name:
-            m = re.search(r'购.*?名称[：:]\s*(.+?)\s+销', text, re.DOTALL)
+            m = re.search(r'购.*?名称[：:]\s*([^\n]+?)(?:\s+销|\s+名称[：:]|\s*统一|$)', text, re.DOTALL)
             if m:
-                info.buyer_name = _clean_name(m.group(1))
-        if not info.buyer_name:
-            m = re.search(r'购买方.*?名称[：:]\s*(.+?)(?:\s*$|\s*统一)', text, re.DOTALL)
+                info.buyer_name = _take_name(m.group(1))
+        if not info.seller_name:
+            m = re.search(r'销.*?名称[：:]\s*([^\n]+?)(?:\s+名称[：:]|\s*统一|$)', text, re.DOTALL)
             if m:
-                name = _clean_name(m.group(1).split('\n')[0])
-                if name and not any(kw in name for kw in company_keywords):
-                    info.buyer_name = name
+                info.seller_name = _take_name(m.group(1))
+        return
 
-    # 财政/医疗电子票据：交款人、收款单位
+    buyer_block = re.search(r'购买方信息(.*?)(?:销售方信息|$)', text, re.DOTALL)
+    seller_block = re.search(r'销售方信息(.*?)(?:项目名称|合计|价税合计|备注|$)', text, re.DOTALL)
+    if buyer_block and not info.buyer_name:
+        m = re.search(r'名称[：:]\s*([^\n]+)', buyer_block.group(1))
+        if m:
+            info.buyer_name = _take_name(m.group(1))
+    if seller_block and not info.seller_name:
+        names = re.findall(r'名称[：:]\s*([^\n]+)', seller_block.group(1))
+        cleaned = [n for n in (_take_name(x) for x in names) if n]
+        company_names = [n for n in cleaned if _is_company(n)]
+        if company_names:
+            info.seller_name = company_names[0]
+        elif cleaned:
+            for n in cleaned:
+                if n != info.buyer_name:
+                    info.seller_name = n
+                    break
+            if not info.seller_name:
+                info.seller_name = cleaned[0]
+
+    if info.buyer_name and info.seller_name:
+        return
+
+    all_name_matches = list(re.finditer(r'名称[：:]\s*([^\n]+)', text))
+    buyer_candidates, seller_candidates = [], []
+    for match in all_name_matches:
+        name = _take_name(match.group(1))
+        if not name:
+            continue
+        if _is_company(name):
+            seller_candidates.append(name)
+        else:
+            buyer_candidates.append(name)
+
+    if not info.seller_name and seller_candidates:
+        info.seller_name = seller_candidates[0]
+    if not info.buyer_name and buyer_candidates:
+        info.buyer_name = buyer_candidates[0]
+
+    if not info.seller_name:
+        m = re.search(r'销.*?名称[：:]\s*([^\n]+?)(?:\s+名称[：:]|\s*统一|$)', text, re.DOTALL)
+        if m:
+            info.seller_name = _take_name(m.group(1))
+    if not info.buyer_name:
+        m = re.search(r'购.*?名称[：:]\s*([^\n]+?)(?:\s+销|\s+名称[：:]|\s*统一|$)', text, re.DOTALL)
+        if m:
+            info.buyer_name = _take_name(m.group(1))
+    if not info.buyer_name:
+        m = re.search(r'购买方.*?名称[：:]\s*([^\n]+)', text, re.DOTALL)
+        if m:
+            info.buyer_name = _take_name(m.group(1))
+
+
+
+def _extract_rail_fields(text: str, info: InvoiceInfo):
+    """铁路电子客票专用字段。"""
+    m = re.search(r'购买方名称[：:]\s*([^\n]+)', text)
+    if m:
+        name = _clean_name(m.group(1).split('统一')[0])
+        if name and '信用代码' not in name:
+            info.buyer_name = name
+
+    # 无企业购方时，身份证号下一行常为乘客姓名
+    if not info.buyer_name:
+        m2 = re.search(
+            r'\d{6}\d{4}\*{4}\d{4}\s*\n\s*([\u4e00-\u9fff·]{2,8})',
+            text,
+        )
+        if m2 and _looks_like_person_name(m2.group(1)):
+            info.buyer_name = m2.group(1)
+
+    m = re.search(r'票价[：:]\s*[¥￥]?\s*([\d,]+\.?\d*)', text)
+    if m:
+        amt = _clean_amount(m.group(1))
+        if amt:
+            info.total_with_tax = amt
+            if not info.subtotal:
+                info.subtotal = amt
+
+    # 铁路票通常不印销售方全称
+    if not info.seller_name:
+        if re.search(r'中国铁路|国家铁路|12306|铁路电子客票|中国国家铁路', text):
+            info.seller_name = '中国国家铁路集团有限公司'
+
+
+def _extract_fiscal_fields(text: str, info: InvoiceInfo):
+    """财政 / 医疗电子票据专用字段。"""
     if not info.buyer_name:
         info.buyer_name = _extract_payer_name(text)
     if not info.seller_name:
         info.seller_name = _extract_receipt_seller(text)
 
-    # 5. 合计金额（不含税）
+    if not info.total_with_tax:
+        info.total_with_tax = _extract_amount_from_text(text)
+
+    # 交款人标签被 OCR 拆坏时，尝试「校验码」与「开票日期」之间的短中文名
+    if not info.buyer_name:
+        m = re.search(
+            r'校验码[：:]?\s*\d+\s*\n\s*([\u4e00-\u9fff·]{2,8})\s*\n\s*开',
+            text,
+        )
+        if m and _looks_like_person_name(m.group(1)):
+            info.buyer_name = m.group(1)
+
+
+def _extract_amount_vat(text: str, info: InvoiceInfo):
+    """增值税发票金额字段。"""
     m = re.search(r'合\s*计\s*[¥￥]\s*([\d,]+\.?\d*)', text)
     if m:
-        info.subtotal = m.group(1).replace(',', '')
+        info.subtotal = _clean_amount(m.group(1)) or m.group(1).replace(',', '')
 
-    # 6. 价税合计 — 多种写法
-    m = re.search(r'价税合计.*?[（(]小写[）)]\s*[¥￥]\s*([\d,]+\.?\d*)', text, re.DOTALL)
-    if m:
-        info.total_with_tax = m.group(1).replace(',', '')
-    else:
-        m = re.search(r'[（(]小写[）)]\s*[¥￥]?\s*(\d+\.\d{2})', text)
-        if m:
-            info.total_with_tax = m.group(1).replace(',', '')
+    amt = _extract_amount_from_text(text)
+    if amt:
+        info.total_with_tax = amt
     if not info.total_with_tax:
-        m = re.search(r'[（(]小写[）)]\s*[¥￥]?\s*([\d,]+\.?\d*)', text)
+        m = re.search(r'价税合计.*?[¥￥]\s*([\d,]+\.?\d*)', text, re.DOTALL)
         if m:
-            info.total_with_tax = m.group(1).replace(',', '')
-    if not info.total_with_tax:
-        m = re.search(r'金额合计.*?[（(]小写[）)]\s*([\d,]+\.?\d*)', text, re.DOTALL)
-        if m:
-            info.total_with_tax = m.group(1).replace(',', '')
-    if not info.total_with_tax or (
-        info.total_with_tax.isdigit() and len(info.total_with_tax) >= 5
-    ):
-        m = re.search(r'个人[见现]?金支付[：:]\s*(\d+\.\d{2})', text)
-        if m:
-            info.total_with_tax = m.group(1)
+            info.total_with_tax = _clean_amount(m.group(1))
 
-    # 7. 手机号码
-    #    多种格式：电话号码：13829968804 / 电话：13829968804 / 电话号码:13829968804（OCR 紧凑格式）
+
+def _extract_phone_and_period(text: str, info: InvoiceInfo):
+    """通讯类发票附加字段。"""
     m = re.search(r'电话\s*号?\s*码?\s*[：:]\s*(\d{11})', text)
     if m:
         info.phone_number = m.group(1)
@@ -840,7 +1262,6 @@ def _extract_fields(text: str, info: InvoiceInfo):
         m = re.search(r'电话\s*[：:]\s*(\d{11})', text)
         if m:
             info.phone_number = m.group(1)
-    # 手机号码也出现在页面独立区域，OCR 可能识别为单独一行
     if not info.phone_number:
         m = re.search(r'手机号码[：:]\s*(\d{11})', text)
         if m:
@@ -850,8 +1271,6 @@ def _extract_fields(text: str, info: InvoiceInfo):
         if m:
             info.phone_number = m.group(1)
 
-    # 8. 计费时段/计费周期
-    #    格式：计费周期：202601 / 计费时段：2026年01月 / 计费周期:202601（OCR 紧凑格式）
     m = re.search(r'计费[时段周期]+[：:]\s*(\d{6})', text)
     if m:
         period = m.group(1)
@@ -871,6 +1290,50 @@ def _extract_fields(text: str, info: InvoiceInfo):
             info.billing_period = f"{period[:4]}-{period[4:6]}"
 
 
+def _extract_fields(text: str, info: InvoiceInfo):
+    """自动识别发票类型并分流提取；用户无需手动选择类型。"""
+    text = _normalize_ocr_text(text)
+    inv_type = detect_invoice_type(text)
+    info.invoice_type = inv_type
+
+    # 通用：号码 + 日期
+    info.invoice_number = _extract_invoice_number(text)
+    info.invoice_date = _extract_invoice_date(text)
+
+    if inv_type == INVOICE_TYPE_RAIL:
+        _extract_rail_fields(text, info)
+    elif inv_type == INVOICE_TYPE_FISCAL:
+        _extract_fiscal_fields(text, info)
+        # 财政票若销售方仍空，再试通用购销（少数混排）
+        if not info.seller_name or not info.buyer_name:
+            _extract_buyer_seller_vat(text, info)
+        if not info.total_with_tax:
+            _extract_amount_vat(text, info)
+    else:
+        # vat / unknown：走增值税通用逻辑，再用铁路/财政兜底补缺
+        _extract_buyer_seller_vat(text, info)
+        _extract_amount_vat(text, info)
+        if not info.buyer_name or not info.total_with_tax:
+            # 未判成 rail 但出现票价时补一次
+            if re.search(r'票价[：:].*[¥￥]|铁路电子客票|电子客票号', text):
+                _extract_rail_fields(text, info)
+        if not info.buyer_name:
+            info.buyer_name = _extract_payer_name(text)
+        if not info.seller_name:
+            info.seller_name = _extract_receipt_seller(text)
+        if not info.total_with_tax:
+            _extract_fiscal_fields(text, info)
+
+    # 通讯费附加字段（仅当文本里出现时才有值）
+    _extract_phone_and_period(text, info)
+
+    # 金额最终清洗
+    if info.total_with_tax:
+        info.total_with_tax = _clean_amount(info.total_with_tax) or info.total_with_tax
+    if info.subtotal:
+        info.subtotal = _clean_amount(info.subtotal) or info.subtotal
+
+
 def _build_invoice_from_text(full_text, table_text, pdf_path, source_folder, method):
     """从页面文本构建 InvoiceInfo。"""
     info = InvoiceInfo()
@@ -881,11 +1344,15 @@ def _build_invoice_from_text(full_text, table_text, pdf_path, source_folder, met
     if not info.subtotal:
         m = re.search(r'合\s*计\s*[¥￥]\s*([\d,]+\.?\d*)', table_text)
         if m:
-            info.subtotal = m.group(1).replace(',', '')
+            info.subtotal = _clean_amount(m.group(1)) or m.group(1).replace(',', '')
     if not info.total_with_tax:
         m = re.search(r'价税合计.*?[¥￥]\s*([\d,]+\.?\d*)', table_text, re.DOTALL)
         if m:
-            info.total_with_tax = m.group(1).replace(',', '')
+            info.total_with_tax = _clean_amount(m.group(1))
+        if not info.total_with_tax:
+            m = re.search(r'票价[：:]\s*[¥￥]?\s*([\d,]+\.?\d*)', table_text)
+            if m:
+                info.total_with_tax = _clean_amount(m.group(1))
     return info
 
 
@@ -1108,14 +1575,60 @@ def _extract_hybrid(pdf_path: str, source_folder: str = "") -> list:
     return invoices
 
 
-def extract_all_invoices(pdf_path: str, source_folder: str = "") -> list:
-    """
-    智能提取 PDF 中的所有发票。
-    采用逐页混合策略：文本层优先，图片页自动 OCR。
-    """
-    fname = os.path.basename(pdf_path)
+def extract_invoice_from_image(image_path: str, source_folder: str = "") -> list:
+    """对单张发票图片（JPG/PNG 等）执行 OCR 识别。"""
+    invoices = []
+    fname = os.path.basename(image_path)
 
-    if _is_image_based_pdf(pdf_path):
+    if _ocr_failed:
+        sys.stderr.write(f"  [跳过] '{fname}' 为图片文件，但 PaddleOCR 不可用\n")
+        sys.stderr.flush()
+        return invoices
+
+    try:
+        ocr = _get_ocr()
+        _emit_progress(f"  [图片] '{fname}' → OCR 识别中...")
+        ocr_text = _run_ocr_on_image(ocr, image_path)
+        if not ocr_text.strip():
+            return invoices
+
+        page_type = _classify_page(ocr_text, source='ocr')
+        if page_type != 'invoice':
+            sys.stderr.write(f"  [过滤] '{fname}' 未识别为发票页面\n")
+            sys.stderr.flush()
+            return invoices
+
+        info = _build_invoice_from_text(
+            ocr_text, ocr_text, image_path, source_folder, "OCR"
+        )
+        if info.invoice_number:
+            invoices.append(info)
+            _emit_progress(
+                f"  [图片] '{fname}' ✓ "
+                f"发票 {info.invoice_number} ¥{info.total_with_tax or '?'}"
+            )
+        if invoices:
+            _emit_progress(f"  [完成] '{fname}' 共识别 {len(invoices)} 张发票")
+    except RuntimeError:
+        pass
+    except Exception as e:
+        sys.stderr.write(f"  [错误] 图片识别 '{fname}' 时出错: {e}\n")
+        sys.stderr.flush()
+
+    return invoices
+
+
+def extract_all_invoices(file_path: str, source_folder: str = "") -> list:
+    """
+    智能提取文件中的所有发票。
+    支持 PDF（逐页混合策略）和图片文件（直接 OCR）。
+    """
+    if is_image_file(file_path):
+        return extract_invoice_from_image(file_path, source_folder)
+
+    fname = os.path.basename(file_path)
+
+    if _is_image_based_pdf(file_path):
         if _ocr_failed:
             sys.stderr.write(f"  [跳过] '{fname}' 为图片型 PDF，但 PaddleOCR 不可用\n")
             sys.stderr.flush()
@@ -1126,16 +1639,16 @@ def extract_all_invoices(pdf_path: str, source_folder: str = "") -> list:
         print(f"  [混合] '{fname}' → 文本 + OCR 逐页识别...")
         _emit_progress(f"  [混合] '{fname}' → 开始逐页识别...")
 
-    return _extract_hybrid(pdf_path, source_folder)
+    return _extract_hybrid(file_path, source_folder)
 
 
 def _discover_folders(base_dir: str) -> dict:
     """
-    递归扫描目录结构，发现所有 PDF 所在的文件夹。
+    递归扫描目录结构，发现所有发票文件（PDF / 图片）所在的文件夹。
 
-    返回: { "相对路径或.": [pdf路径列表], ... }
-      - base_dir 下直接有 PDF → {".": [pdf列表]}
-      - 子目录中的 PDF → {"子文件夹": [...], "子文件夹/嵌套": [...], ...}
+    返回: { "相对路径或.": [文件路径列表], ... }
+      - base_dir 下直接有文件 → {".": [文件列表]}
+      - 子目录中的文件 → {"子文件夹": [...], "子文件夹/嵌套": [...], ...}
     """
     folders = {}
     base_dir = os.path.abspath(base_dir)
@@ -1146,19 +1659,19 @@ def _discover_folders(base_dir: str) -> dict:
     for root, dirnames, filenames in os.walk(base_dir):
         dirnames[:] = sorted(
             d for d in dirnames
-            if not d.startswith('.') and d != 'excel'
+            if not d.startswith('.') and d != 'excel' and d != '.chunks'
         )
-        pdfs = sorted(
+        invoice_files = sorted(
             os.path.join(root, f)
             for f in filenames
-            if f.lower().endswith('.pdf')
+            if is_supported_invoice_file(f)
         )
-        if not pdfs:
+        if not invoice_files:
             continue
 
         rel = os.path.relpath(root, base_dir)
         key = '.' if rel == '.' else rel.replace('\\', '/')
-        folders.setdefault(key, []).extend(pdfs)
+        folders.setdefault(key, []).extend(invoice_files)
 
     return folders
 
@@ -1412,36 +1925,36 @@ def main():
     folders = _discover_folders(input_dir)
 
     if not folders:
-        print("\n  ❌ 未找到任何 PDF 文件！")
+        print("\n  ❌ 未找到任何发票文件（PDF / 图片）！")
         return
 
     # 统计
-    total_pdf_count = sum(len(pdfs) for pdfs in folders.values())
+    total_file_count = sum(len(files) for files in folders.values())
     folder_names = list(folders.keys())
 
     if len(folders) == 1 and folder_names[0] == ".":
-        print(f"  📁 单文件夹模式，共 {total_pdf_count} 个 PDF")
+        print(f"  📁 单文件夹模式，共 {total_file_count} 个文件")
     else:
-        print(f"  📁 发现 {len(folders)} 个文件夹，共 {total_pdf_count} 个 PDF：")
-        for fname, pdfs in folders.items():
-            print(f"       · {fname} ({len(pdfs)} 个 PDF)")
+        print(f"  📁 发现 {len(folders)} 个文件夹，共 {total_file_count} 个文件：")
+        for fname, files in folders.items():
+            print(f"       · {fname} ({len(files)} 个文件)")
 
     print()
 
     # ---- 逐文件夹、逐文件解析 ----
     folder_invoices = {}  # { "文件夹名": [InvoiceInfo列表] }
 
-    for folder_name, pdf_paths in folders.items():
+    for folder_name, file_paths in folders.items():
         if folder_name != ".":
             print(f"  ▸ 文件夹: {folder_name}")
         else:
             print(f"  ▸ 根目录")
 
         invoices = []
-        for idx, pdf_path in enumerate(pdf_paths, 1):
-            fname = os.path.basename(pdf_path)
-            print(f"     [{idx}/{len(pdf_paths)}] {fname}")
-            results = extract_all_invoices(pdf_path, source_folder=folder_name)
+        for idx, file_path in enumerate(file_paths, 1):
+            fname = os.path.basename(file_path)
+            print(f"     [{idx}/{len(file_paths)}] {fname}")
+            results = extract_all_invoices(file_path, source_folder=folder_name)
             invoices.extend(results)
 
             if results:
